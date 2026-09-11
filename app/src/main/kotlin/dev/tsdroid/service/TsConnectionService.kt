@@ -43,11 +43,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
+import dev.tsdroid.ui.component.defaultAvatarColors
 import androidx.lifecycle.*
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -62,6 +64,7 @@ import dev.tslib.Identity
 import dev.tslib.Channel
 import dev.tslib.User
 import dev.tsdroid.ui.component.ChannelTree
+import kotlin.math.absoluteValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -193,14 +196,21 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                             overlayActiveSpeakerId = speakerId
                             overlayActiveSpeakerName = findUserNickname(speakerId)
                             val uid = speaker?.uid
-                            if (!uid.isNullOrEmpty()) {
-                                serviceScope.launch(Dispatchers.IO) {
-                                    avatarCache.clearMemoryCache(uid)
-                                    avatarCache.loadAvatar(uid, tsClient)
-                                    val avatar = avatarCache.getAvatar(uid)
-                                    withContext(Dispatchers.Main) {
-                                        if (overlayActiveSpeakerId == speakerId) {
-                                            overlayActiveSpeakerAvatar = avatar
+                            // 先看服务器给的头像标记（client_flag_avatar）：为空就是"这个人没设头像"，
+                            // 此时请求 /avatar_xxx 服务器会回 0x0806 FileInvalidPath —— 不要问不存在的文件
+                            val hasAvatar = !uid.isNullOrEmpty() && !speaker?.avatarId.isNullOrEmpty()
+                            if (hasAvatar) {
+                                val cached = avatarCache.getAvatar(uid!!)
+                                overlayActiveSpeakerAvatar = cached
+                                if (cached == null) {
+                                    // 失败最多重试 MAX_RETRIES 次（不再每次说话都 clearMemoryCache 重来一遍）
+                                    serviceScope.launch(Dispatchers.IO) {
+                                        avatarCache.loadAvatar(uid, tsClient)
+                                        val avatar = avatarCache.getAvatar(uid)
+                                        withContext(Dispatchers.Main) {
+                                            if (overlayActiveSpeakerId == speakerId) {
+                                                overlayActiveSpeakerAvatar = avatar
+                                            }
                                         }
                                     }
                                 }
@@ -792,6 +802,13 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                     } else null
                 }
                 
+                // 头像兜底用谁的名字：本地说话用自己的，远端说话用说话人的
+                val displayNickname = when {
+                    isLocalUserSpeaking -> localUser?.nickname ?: activeSpeakerName
+                    isRemoteUserSpeaking -> activeSpeakerName
+                    else -> localUser?.nickname
+                }
+
                 val borderColor = if (isSpeaking) Color(0xFF2196F3) else Color(0x4DFFFFFF)
                 val borderWidth = if (isSpeaking) 2.dp else 1.dp
                 
@@ -821,13 +838,23 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                                 alpha = 1.0f
                             )
                         } else if (isSpeaking) {
-                            // Speaking but no avatar: show person icon
-                            Icon(
-                                Icons.Default.Person,
-                                contentDescription = "Active Speaker",
-                                tint = Color.White,
-                                modifier = Modifier.align(Alignment.Center)
-                            )
+                            // 没有头像（服务器上这个人就没设头像）：用首字头像兜底，和频道树同一套取色，
+                            // 别显示一个跟谁都对不上的通用人形图标
+                            val nick = displayNickname ?: "?"
+                            val bgColor = defaultAvatarColors[
+                                nick.hashCode().absoluteValue % defaultAvatarColors.size
+                            ]
+                            Box(
+                                modifier = Modifier.fillMaxSize().clip(CircleShape).background(bgColor),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = nick.firstOrNull()?.uppercase() ?: "?",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp,
+                                )
+                            }
                         } else {
                             // No speaker: Show software logo
                             androidx.compose.foundation.Image(
@@ -898,7 +925,7 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                                 .padding(vertical = 8.dp)
                         ) {
                             items(activeUsers) { user ->
-                                val isSpeaking = if (user.id == myId) (isLocalVoiceActive || overlayActiveSpeakerId == myId) else user.nickname == activeSpeakerName
+                                val isSpeaking = if (user.id == myId) isLocalVoiceActive else user.id == overlayActiveSpeakerId
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -908,8 +935,9 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                                     // Use smaller avatar for the expanded list instead of green dot
                                     var avatarBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
                                     
-                                    LaunchedEffect(user.uid) {
-                                        if (!user.uid.isNullOrEmpty()) {
+                                    LaunchedEffect(user.uid, user.avatarId) {
+                                        // 没有 avatarId 的人根本不要去请求（服务器会回 FileInvalidPath）
+                                        if (!user.uid.isNullOrEmpty() && !user.avatarId.isNullOrEmpty()) {
                                             val cached = avatarCache.getAvatar(user.uid)
                                             if (cached != null) {
                                                 avatarBitmap = cached
@@ -938,12 +966,21 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                                                 contentScale = ContentScale.Crop
                                             )
                                         } else {
-                                            Icon(
-                                                Icons.Default.Person,
-                                                contentDescription = null,
-                                                tint = Color.White,
-                                                modifier = Modifier.size(16.dp)
-                                            )
+                                            // 首字头像兜底（同频道树取色）
+                                            val bgColor = defaultAvatarColors[
+                                                user.nickname.hashCode().absoluteValue % defaultAvatarColors.size
+                                            ]
+                                            Box(
+                                                modifier = Modifier.fillMaxSize().clip(CircleShape).background(bgColor),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Text(
+                                                    text = user.nickname.firstOrNull()?.uppercase() ?: "?",
+                                                    color = Color.White,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 11.sp,
+                                                )
+                                            }
                                         }
                                     }
                                     

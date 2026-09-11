@@ -134,7 +134,7 @@ fun UserItem(
     }
 }
 
-private val defaultAvatarColors = listOf(
+internal val defaultAvatarColors = listOf(
     Color(0xFF5C6BC0), // indigo
     Color(0xFF26A69A), // teal
     Color(0xFFEF5350), // red
