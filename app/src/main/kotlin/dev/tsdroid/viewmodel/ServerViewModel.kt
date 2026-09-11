@@ -28,7 +28,6 @@ import dev.tsdroid.data.BookmarkStore
 import dev.tsdroid.data.MessageStore
 import dev.tsdroid.data.SettingsStore
 import dev.tsdroid.service.TsConnectionService
-import dev.tsdroid.service.WhisperManager
 import dev.tslib.Channel
 import dev.tslib.ConnectionState
 import dev.tslib.Event
@@ -113,8 +112,6 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
     private val _mutedUserIds = MutableStateFlow<Set<Int>>(emptySet())
     val mutedUserIds: StateFlow<Set<Int>> = _mutedUserIds.asStateFlow()
 
-    // Whisper (密聊) state — bridged from WhisperManager
-
     // Users with isTalking patched from talk status events
     private val _users = MutableStateFlow<List<User>>(emptyList())
     val users: StateFlow<List<User>> = _users.asStateFlow()
@@ -154,6 +151,10 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
 
     val audioGain: StateFlow<Float> = settingsStore.audioGain
         .stateIn(viewModelScope, SharingStarted.Eagerly, 1.0f)
+
+    /** 说话圈门限（dBFS，默认 -40）：设置页可调，改了立刻生效 */
+    val ringThresholdDb: StateFlow<Float> = settingsStore.ringThresholdDb
+        .stateIn(viewModelScope, SharingStarted.Eagerly, -40f)
 
     val showLinkThumbnails: StateFlow<Boolean> = settingsStore.showLinkThumbnails
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -205,8 +206,10 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
                 
                 users.map { user ->
                     val isLocallyTalking = (user.id == myId && localTalking)
-                    val isRemoteTalking = user.id in talking
-                    val shouldBeTalking = isLocallyTalking || isRemoteTalking
+                    // 远端圈：判据 = 解码后的真实音频能量（AudioBridge 算 dBFS + 250ms 保持）。
+                    // 不要再用"最近 300ms 收到语音包"：对方客户端开麦/环境噪声时它会一直发流，
+                    // 圈就会常亮、不跟着人动（实测踩过）。talk_status_* 事件也不能用（一次性）。
+                    val shouldBeTalking = isLocallyTalking || talking.contains(user.id)
                     
                     if (shouldBeTalking && !user.isTalking) user.withTalking(true)
                     else if (!shouldBeTalking && user.isTalking) user.withTalking(false)
@@ -328,6 +331,14 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
                     service.audioBridge.gainFactor = gain
                 }
             }
+            // 说话圈：门限（落盘值）→ 音频桥；"谁在说话"（能量判据）→ 频道树的圈
+            service.audioBridge.setRingThresholdDb(ringThresholdDb.value.toDouble())
+            viewModelScope.launch {
+                ringThresholdDb.collect { db -> service.audioBridge.setRingThresholdDb(db.toDouble()) }
+            }
+            viewModelScope.launch {
+                service.audioBridge.speakingUserIds.collect { ids -> _talkingUserIds.value = ids }
+            }
             // Observe audio state for local talking status
             viewModelScope.launch {
                 service.audioBridge.isLocalVoiceActive.collect { _isLocalTalking.value = it }
@@ -396,14 +407,9 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
     private fun handleEvent(event: Event) {
         try {
             when (event.type) {
-                "talk_status_start" -> {
-                    val userId = (event.data["user_id"] as? Number)?.toInt() ?: return
-                    _talkingUserIds.value = _talkingUserIds.value + userId
-                }
-                "talk_status_stop" -> {
-                    val userId = (event.data["user_id"] as? Number)?.toInt() ?: return
-                    _talkingUserIds.value = _talkingUserIds.value - userId
-                }
+                // talk_status_start / talk_status_stop 不再用于圈：
+                // 该事件是一次性的（连接瞬间爆发一次就没了），且判据是"收到语音包"不是"有声音"。
+                // 现在由 AudioBridge.speakingUserIds（解码 PCM 能量）统一驱动。
                 "text_message" -> {
                     try {
                         // Safely extract message data with null checks
@@ -607,19 +613,6 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         scheduleSave()
     }
 
-    // ── Whisper (密聊) ──────────────────────────────────────────
-
-    fun toggleWhisper(userId: Int) {
-        WhisperManager.toggleWhisper(userId)
-    }
-
-    fun sendWhisperMessage(text: String) {
-        WhisperManager.sendWhisperMessage(text)
-    }
-
-    val whisperCandidateUsers: List<User>
-        get() = _users.value.filter { it.id != tsClient?.clientId }
-
     fun moveToChannel(channelId: Long) {
         tsClient?.moveToChannel(channelId)
     }
@@ -712,6 +705,91 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * 流式下载到应用缓存目录（Documents/TS6 Droid/...）：边收边写盘，不把整份文件读进内存。
+     * 大文件（几十~几百 MB）也不会 OOM；失败时删掉半成品。
+     */
+    private suspend fun streamDownloadToCache(
+        client: TsClient,
+        channelId: Long,
+        remotePath: String,
+        host: String,
+        cachePath: String,
+    ): Pair<android.net.Uri, Long>? {
+        // 已有缓存直接用
+        fileCache.getUri(host, cachePath)?.let { return it to -1L }
+
+        val sink = fileCache.openSink(host, cachePath) ?: return null
+        var written = 0L
+        val total = try {
+            client.downloadFileStreaming(channelId, remotePath) { chunk ->
+                sink.output.write(chunk)
+                written += chunk.size
+            }
+        } finally {
+            try { sink.output.close() } catch (_: Exception) {}
+        }
+        if (total == null) {
+            fileCache.abortSink(sink.uri)
+            Log.w(TAG, "streamDownloadToCache failed: $remotePath (已写 $written 字节)")
+            return null
+        }
+        fileCache.commitSink(sink.uri)
+        Log.i(TAG, "streamDownloadToCache ok: $remotePath ($written 字节)")
+        return sink.uri to written
+    }
+
+    /** 把已落盘的缓存文件复制进系统下载目录（流式复制，不占内存） */
+    private suspend fun copyUriToDownloads(fileName: String, src: android.net.Uri): android.net.Uri? =
+        withContext(Dispatchers.IO) {
+            val context = getApplication<Application>()
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val dst = context.contentResolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
+                ) ?: return@withContext null
+                context.contentResolver.openInputStream(src)?.use { input ->
+                    context.contentResolver.openOutputStream(dst)?.use { output ->
+                        input.copyTo(output, bufferSize = 256 * 1024)
+                    }
+                }
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                context.contentResolver.update(dst, values, null, null)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, context.getString(R.string.file_saved, fileName), Toast.LENGTH_SHORT).show()
+                }
+                dst
+            } catch (e: Exception) {
+                Log.w(TAG, "copyUriToDownloads failed for $fileName", e)
+                null
+            }
+        }
+
+    /** 从已落盘的缓存 Uri 里抽样解码图片（不再需要整份字节） */
+    private fun decodeSampledBitmapFromUri(uri: android.net.Uri, maxDimension: Int): android.graphics.Bitmap? {
+        val resolver = getApplication<Application>().contentResolver
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            val width = bounds.outWidth
+            val height = bounds.outHeight
+            var sampleSize = 1
+            if (width > maxDimension || height > maxDimension) {
+                var half = maxOf(width, height) / 2
+                while (half / sampleSize >= maxDimension) sampleSize *= 2
+            }
+            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+        } catch (e: Exception) {
+            Log.w(TAG, "decodeSampledBitmapFromUri failed", e)
+            null
+        }
+    }
+
     fun downloadAttachment(attachment: FileAttachment): StateFlow<DownloadState> {
         val host = serverAddress?.substringBefore(':') ?: "unknown"
         val cachePath = attachment.fileName.trimStart('/')
@@ -732,54 +810,23 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         downloadCache[cacheKey] = state
 
         viewModelScope.launch(Dispatchers.IO) {
-            // Check disk cache first
-            val cached = fileCache.get(host, cachePath)
-            val bytes = cached ?: client.downloadFile(channelId, "/${attachment.fileName}")
-
-            if (bytes != null) {
-                // Save to disk cache if this was a fresh download
-                if (cached == null) {
-                    fileCache.put(host, cachePath, bytes)
-                }
-
-                if (attachment.isImage) {
-                    val bmp = decodeSampledBitmap(bytes, 1280)
-                    val uri = fileCache.getUri(host, cachePath)
-                    state.value = DownloadState.Done(bmp?.asImageBitmap(), uri)
-                } else {
-                    val dlUri = saveToDownloads(attachment.fileName.substringAfterLast('/'), bytes)
-                    state.value = DownloadState.Done(null, dlUri)
-                }
-            } else {
+            // 分块流式下载（边收边落盘），大文件也不进内存
+            val got = streamDownloadToCache(client, channelId, "/${attachment.fileName}", host, cachePath)
+            if (got == null) {
                 downloadCache.remove(cacheKey)
                 state.value = DownloadState.Error("Échec du téléchargement")
+                return@launch
+            }
+            val (localUri, _) = got
+            if (attachment.isImage) {
+                val bmp = decodeSampledBitmapFromUri(localUri, 1280)
+                state.value = DownloadState.Done(bmp?.asImageBitmap(), localUri)
+            } else {
+                val dlUri = copyUriToDownloads(attachment.fileName.substringAfterLast('/'), localUri)
+                state.value = DownloadState.Done(null, dlUri)
             }
         }
         return state
-    }
-
-    private suspend fun saveToDownloads(fileName: String, data: ByteArray): android.net.Uri? {
-        val context = getApplication<Application>()
-        return try {
-            val contentValues = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                put(MediaStore.Downloads.IS_PENDING, 1)
-            }
-            val uri = context.contentResolver.insert(
-                MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues
-            ) ?: return null
-            context.contentResolver.openOutputStream(uri)?.use { it.write(data) }
-            contentValues.clear()
-            contentValues.put(MediaStore.Downloads.IS_PENDING, 0)
-            context.contentResolver.update(uri, contentValues, null, null)
-            withContext(Dispatchers.Main) {
-                Toast.makeText(context, context.getString(R.string.file_saved, fileName), Toast.LENGTH_SHORT).show()
-            }
-            uri
-        } catch (e: Exception) {
-            Log.w(TAG, "saveToDownloads failed for $fileName", e)
-            null
-        }
     }
 
     private fun decodeSampledBitmap(data: ByteArray, maxDimension: Int): android.graphics.Bitmap? {
@@ -918,18 +965,31 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         val cachePath = fullName.trimStart('/')
 
         viewModelScope.launch(Dispatchers.IO) {
-            val cached = fileCache.get(host, cachePath)
-            val bytes = cached ?: client.downloadFile(channelId, "/$fullName")
-            if (bytes != null) {
-                if (cached == null) {
-                    fileCache.put(host, cachePath, bytes)
+            // 文件管理器下载：直接边收边写进系统下载目录（大文件不再先缓存再复制，省一半磁盘）
+            val sink = fileCache.openDownloadsSink(fileName) ?: return@launch
+            var written = 0L
+            val total = try {
+                client.downloadFileStreaming(channelId, "/$fullName") { chunk ->
+                    sink.output.write(chunk)
+                    written += chunk.size
                 }
-                val dlUri = saveToDownloads(fileName, bytes)
-                if (dlUri != null) {
-                    withContext(Dispatchers.Main) {
-                        openFileUri(dlUri, fileName)
-                    }
-                }
+            } finally {
+                try { sink.output.close() } catch (_: Exception) {}
+            }
+            if (total == null) {
+                fileCache.abortSink(sink.uri)
+                Log.w(TAG, "文件管理器下载失败: $fullName (已写 $written 字节)")
+                return@launch
+            }
+            fileCache.commitSink(sink.uri)
+            Log.i(TAG, "文件管理器下载完成: $fullName ($written 字节)")
+            withContext(Dispatchers.Main) {
+                Toast.makeText(
+                    getApplication(),
+                    getApplication<Application>().getString(R.string.file_saved, fileName),
+                    Toast.LENGTH_SHORT,
+                ).show()
+                openFileUri(sink.uri, fileName)
             }
         }
     }
@@ -943,12 +1003,11 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         val cachePath = fullName.trimStart('/')
 
         viewModelScope.launch(Dispatchers.IO) {
-            val cached = fileCache.get(host, cachePath)
-            val bytes = cached ?: client.downloadFile(channelId, "/$fullName")
+            val got = streamDownloadToCache(client, channelId, "/$fullName", host, cachePath)
+                ?: return@launch
+            val bytes = getApplication<Application>().contentResolver
+                .openInputStream(got.first)?.use { it.readBytes() }
             if (bytes != null) {
-                if (cached == null) {
-                    fileCache.put(host, cachePath, bytes)
-                }
                 _previewImageBytes.value = bytes
                 _previewImageName.value = fileName
             }

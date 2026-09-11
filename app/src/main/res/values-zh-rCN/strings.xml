@@ -46,6 +46,7 @@
     <string name="auto_load_images">自动加载图片</string>
     <string name="enable_floating_window">启用悬浮窗</string>
     <string name="noise_suppression">麦克风降噪</string>
+    <string name="ring_threshold">说话圈门限</string>
     <string name="chat">聊天</string>
     <string name="push_to_talk">按住说话</string>
     <string name="ptt">按键说话</string>

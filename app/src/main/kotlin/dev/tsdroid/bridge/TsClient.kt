@@ -87,7 +87,6 @@ class TsClient {
     private val _commandErrors = MutableSharedFlow<String>(replay = 1, extraBufferCapacity = 16)
     val commandErrors: SharedFlow<String> = _commandErrors.asSharedFlow()
 
-    private val downloadCallbacks = ConcurrentHashMap<String, CompletableDeferred<ByteArray>>()
     private val uploadCallbacks = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     private val fileListCallbacks = ConcurrentHashMap<String, CompletableDeferred<List<TsFileEntry>>>()
 
@@ -285,11 +284,24 @@ class TsClient {
         when (event.type) {
             "disconnected" -> _state.value = ConnectionState.DISCONNECTED
             "connected" -> _state.value = ConnectionState.CONNECTED
-            "file_downloaded" -> {
+            "file_download_chunk" -> {
                 val path = event.data["path"] as? String ?: return
                 val data = event.data["data"] as? ByteArray ?: return
-                Log.d(TAG, "File downloaded: $path (${data.size} bytes)")
-                downloadCallbacks.remove(path)?.complete(data)
+                val sink = downloadSinks[path] ?: return
+                try {
+                    sink(data)
+                } catch (e: Throwable) {
+                    // 落盘失败：终止这次下载，别把异常带进事件循环
+                    Log.e(TAG, "写盘失败，终止下载 $path", e)
+                    downloadSinks.remove(path)
+                    downloadResults.remove(path)?.completeExceptionally(e)
+                }
+            }
+            "file_downloaded" -> {
+                val path = event.data["path"] as? String ?: return
+                val size = (event.data["size"] as? Number)?.toLong() ?: -1L
+                Log.i(TAG, "File downloaded: $path ($size bytes)")
+                downloadResults.remove(path)?.complete(size)
             }
             "file_uploaded" -> {
                 val path = event.data["path"] as? String ?: return
@@ -300,8 +312,8 @@ class TsClient {
                 val path = event.data["path"] as? String ?: return
                 val error = event.data["error"] as? String ?: "unknown"
                 Log.w(TAG, "File transfer failed: $path — $error")
-                downloadCallbacks.remove(path)?.completeExceptionally(
-                    Exception("File transfer failed: $error")
+                downloadResults.remove(path)?.completeExceptionally(
+                    java.io.IOException("File transfer failed: $error")
                 )
                 uploadCallbacks.remove(path)?.complete(false)
             }
@@ -336,6 +348,7 @@ class TsClient {
     @Volatile private var lastRefreshMs = 0L
     private var lastChannelsKey = ""
     private var lastUsersKey = ""
+    private var lastTalkN = -1
 
     /** 断线/重连后清掉去重缓存，保证下一轮一定刷新 */
     private fun resetRefreshCache() {
@@ -391,6 +404,11 @@ class TsClient {
             }
             if (usersKey != lastUsersKey) {
                 lastUsersKey = usersKey
+                val talkN = users.count { it.isTalking }
+                if (talkN != lastTalkN) {
+                    lastTalkN = talkN
+                    Log.i(TAG, "说话人快照变化: talking=$talkN / users=${users.size}")
+                }
                 _users.value = users
             }
 
@@ -542,9 +560,44 @@ class TsClient {
         }
     }
 
-    suspend fun downloadFile(channelId: Long, path: String): ByteArray? {
-        val deferred = CompletableDeferred<ByteArray>()
-        downloadCallbacks[path] = deferred
+    /**
+     * 小文件（头像/图标）下载：分块收进内存，超过 maxBytes 直接放弃。
+     * 大文件请用 downloadFileStreaming（边收边落盘）。
+     */
+    suspend fun downloadFile(
+        channelId: Long,
+        path: String,
+        maxBytes: Int = 2 * 1024 * 1024,
+    ): ByteArray? {
+        val out = java.io.ByteArrayOutputStream()
+        val total = downloadFileStreaming(channelId, path) { chunk ->
+            if (out.size() + chunk.size > maxBytes) {
+                throw java.io.IOException("文件超过 ${maxBytes / 1024} KB，按小文件下载放弃")
+            }
+            out.write(chunk)
+        }
+        if (total == null) return null
+        return out.toByteArray()
+    }
+
+    // ── 分块下载 ─────────────────────────────────────────────
+    // Rust 侧后台任务每 256KB 推一个 file_download_chunk，这里边收边交给调用方落盘；
+    // 完成时用 file_downloaded（带 size）收尾。整份文件不再进内存，几百 MB 也能下。
+    private val downloadSinks = java.util.concurrent.ConcurrentHashMap<String, (ByteArray) -> Unit>()
+    private val downloadResults = java.util.concurrent.ConcurrentHashMap<String, CompletableDeferred<Long>>()
+
+    /**
+     * 流式下载：每收到一块就回调 onChunk（调用方写文件）。
+     * @return 实际收到的字节数；失败/超时返回 null
+     */
+    suspend fun downloadFileStreaming(
+        channelId: Long,
+        path: String,
+        onChunk: (ByteArray) -> Unit,
+    ): Long? {
+        val done = CompletableDeferred<Long>()
+        downloadSinks[path] = onChunk
+        downloadResults[path] = done
         val started = withContext(nativeDispatcher) {
             try {
                 val c = client ?: return@withContext false
@@ -557,17 +610,19 @@ class TsClient {
             }
         }
         if (!started) {
-            downloadCallbacks.remove(path)
+            downloadSinks.remove(path); downloadResults.remove(path)
             return null
         }
-        return withTimeoutOrNull(10_000) {
-            try {
-                deferred.await()
-            } catch (e: Exception) {
-                Log.w(TAG, "downloadFile await failed for $path", e)
-                null
-            }
-        }.also { downloadCallbacks.remove(path) }
+        // 不做固定总时长限制（大文件本来就要几分钟）；卡死由 Rust 侧"60 秒无数据"超时兜底
+        val total = try {
+            withTimeoutOrNull(30 * 60_000) { done.await() }
+        } catch (e: Exception) {
+            Log.w(TAG, "downloadFile failed for $path", e)
+            null
+        } finally {
+            downloadSinks.remove(path); downloadResults.remove(path)
+        }
+        return total
     }
 
     suspend fun listFiles(channelId: Long, path: String): List<TsFileEntry>? {

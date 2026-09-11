@@ -88,5 +88,6 @@
     <string name="about_software">About / 关于软件</string>
     <string name="about_back">← Back</string>
     <string name="noise_suppression">Microphone noise suppression</string>
+    <string name="ring_threshold">Speaking ring threshold</string>
     <string name="about_internal_note">Internal build · based on the upstream GPLv3 open-source project</string>
 </resources>

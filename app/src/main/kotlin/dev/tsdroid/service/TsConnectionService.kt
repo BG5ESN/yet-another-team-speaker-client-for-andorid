@@ -58,7 +58,6 @@ import dev.tsdroid.TsDroidApp
 import dev.tsdroid.bridge.AudioBridge
 import dev.tsdroid.bridge.AvatarCache
 import dev.tsdroid.bridge.TsClient
-import dev.tsdroid.bridge.WhisperBridge
 import dev.tslib.Identity
 import dev.tslib.Channel
 import dev.tslib.User
@@ -68,6 +67,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
@@ -168,60 +168,61 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                         audioBridge.playAudio(userId, packetId, bytes)
                     }
                 }
-                "talk_status_start" -> {
-                    val speakerId = (event.data["user_id"] as? Number)?.toInt()
-                    if (speakerId != null) {
-                        // Cancel any pending speaker stop
-                        speakerUpdateJob?.cancel()
-                        pendingSpeakerId = speakerId
-                        
-                        // Delay speaker update to avoid flickering
-                        speakerUpdateJob = serviceScope.launch {
-                            delay(SPEAKER_DELAY_MS)
-                            // Only update if still the pending speaker
-                            if (pendingSpeakerId == speakerId) {
-                                overlayActiveSpeakerId = speakerId
-                                overlayActiveSpeakerName = findUserNickname(speakerId)
-                                val speakerUser = tsClient.users.value.find { it.id == speakerId }
-                                val uid = speakerUser?.uid
-                                if (!uid.isNullOrEmpty()) {
-                                    serviceScope.launch(Dispatchers.IO) {
-                                        // Force refresh speaker avatar
-                                        avatarCache.clearMemoryCache(uid)
-                                        avatarCache.loadAvatar(uid, tsClient)
-                                        val avatar = avatarCache.getAvatar(uid)
-                                        withContext(Dispatchers.Main) {
-                                            if (overlayActiveSpeakerId == speakerId) {
-                                                overlayActiveSpeakerAvatar = avatar
-                                            }
+            }
+        }.launchIn(serviceScope)
+
+        // 悬浮窗的"当前说话人"由音频能量驱动（AudioBridge.loudestSpeakerId，解码 PCM 算 dBFS）。
+        // 以前靠 talk_status_* 事件（一次性）或原生快照 is_talking（"最近 300ms 收到语音包"）：
+        // 后者在对方客户端持续发流时会常亮、不跟着人动。
+        tsClient.users
+            .combine(audioBridge.loudestSpeakerId) { users, loudest -> users to loudest }
+            .onEach { (users, loudest) ->
+                val myId = tsClient.clientId
+                // 谁在说话由音频能量决定（AudioBridge 解码 PCM 算 dBFS + 250ms 保持）；
+                // 多人同时说话取"最响的那个"，不再取无序哈希表里的最后一个（会乱跳/黏住某个人）
+                val speakerId = loudest?.takeIf { it != myId }
+                val speaker = speakerId?.let { id -> users.firstOrNull { u -> u.id == id } }
+                if (speakerId == overlayActiveSpeakerId) return@onEach
+
+                if (speakerId != null) {
+                    speakerUpdateJob?.cancel()          // 有人说话：防抖后更新
+                    pendingSpeakerId = speakerId
+                    speakerUpdateJob = serviceScope.launch {
+                        delay(SPEAKER_DELAY_MS)
+                        if (pendingSpeakerId == speakerId) {
+                            overlayActiveSpeakerId = speakerId
+                            overlayActiveSpeakerName = findUserNickname(speakerId)
+                            val uid = speaker?.uid
+                            if (!uid.isNullOrEmpty()) {
+                                serviceScope.launch(Dispatchers.IO) {
+                                    avatarCache.clearMemoryCache(uid)
+                                    avatarCache.loadAvatar(uid, tsClient)
+                                    val avatar = avatarCache.getAvatar(uid)
+                                    withContext(Dispatchers.Main) {
+                                        if (overlayActiveSpeakerId == speakerId) {
+                                            overlayActiveSpeakerAvatar = avatar
                                         }
                                     }
-                                } else {
-                                    overlayActiveSpeakerAvatar = null
                                 }
-                            }
-                        }
-                    }
-                }
-                "talk_status_stop" -> {
-                    val speakerId = (event.data["user_id"] as? Number)?.toInt()
-                    if (speakerId != null && speakerId == overlayActiveSpeakerId) {
-                        // Use delayed mechanism for speaker state changes
-                        pendingSpeakerId = null
-                        speakerUpdateJob?.cancel()
-                        speakerUpdateJob = serviceScope.launch {
-                            delay(SPEAKER_DELAY_MS)
-                            // Only update if still no pending speaker
-                            if (pendingSpeakerId == null) {
-                                overlayActiveSpeakerId = null
-                                overlayActiveSpeakerName = null
+                            } else {
                                 overlayActiveSpeakerAvatar = null
                             }
                         }
                     }
+                } else {
+                    pendingSpeakerId = null             // 没人说话：防抖后清空
+                    speakerUpdateJob?.cancel()
+                    speakerUpdateJob = serviceScope.launch {
+                        delay(SPEAKER_DELAY_MS)
+                        if (pendingSpeakerId == null) {
+                            overlayActiveSpeakerId = null
+                            overlayActiveSpeakerName = null
+                            overlayActiveSpeakerAvatar = null
+                        }
+                    }
                 }
             }
-        }.launchIn(serviceScope)
+            .launchIn(serviceScope)
 
         tsClient.state.onEach { state ->
             overlayConnected = state == dev.tslib.ConnectionState.CONNECTED
@@ -435,9 +436,6 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
             }
             // Start event loop
             tsClient.startEventLoop()
-            // Initialize whisper manager
-            WhisperManager.init(tsClient)
-            WhisperBridge.tryLoad()
             null
         } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
@@ -474,13 +472,11 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
         }
         hideFloatingWindow()
         audioBridge.stopCapture()
-        WhisperManager.reset()
     }
 
     private fun cleanupFailedConnection() {
         hideFloatingWindow()
         audioBridge.stopCapture()
-        WhisperManager.reset()
         isStopping = false
         restartRequestedWhileStopping = false
         instance = this
@@ -718,7 +714,6 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
         serviceViewModelStore.clear()
         hideFloatingWindow()
         audioBridge.stopCapture()
-        WhisperManager.reset()
         try {
             tsClient.disconnect()
         } catch (e: Throwable) {

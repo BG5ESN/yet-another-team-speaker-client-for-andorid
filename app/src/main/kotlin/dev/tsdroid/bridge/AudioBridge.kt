@@ -44,13 +44,26 @@ class AudioBridge(
         private const val FRAME_SIZE_MS = 20
         private const val FRAME_SIZE_SAMPLES = SAMPLE_RATE * FRAME_SIZE_MS / 1000 // 960
         private const val FRAME_SIZE_BYTES = FRAME_SIZE_SAMPLES * 2 // 16-bit PCM = 2 bytes/sample
-        private const val JB_WAIT_TICKS = 2        // 缺包最多等 2 个时隙（40ms）再判丢
-        private const val JB_MAX_DEPTH = 6         // 只收“近未来”的包（<=12 个包号），限制缓冲深度
-        private const val JB_IDLE_RESET_MS = 250L  // 静默这么久就重置（下一段说话重新起播）
+        // ── 自适应抖动缓冲（按实测抖动/补帧情况动态调深度）──
+        private const val JB_MIN_WAIT_TICKS = 1        // 缺包至少等 1 个时隙再考虑跳号
+        private const val JB_MIN_TARGET_SLOTS = 1      // 目标深度下限（20ms）
+        private const val JB_MAX_TARGET_SLOTS = 8      // 目标深度上限（160ms）
+        private const val JB_PREFILL_TIMEOUT_MS = 150L // 预填充最多等这么久，避免稀疏流开不出声
+        private const val JB_ADAPT_INTERVAL_MS = 1000L // 每秒统计一次
+        private const val JB_SHRINK_IDLE_MS = 5000L    // 干净满 5 秒才回落一档（慢降，防来回抖）
+        private const val JB_MAX_PENDING = 32          // 缓冲上限（≈640ms），超了直接对齐最新
+        private const val JB_JITTER_MAX_MS = 100.0     // 抖动估计上限（别让停顿把深度顶满）
+        private const val JB_IDLE_RESET_MS = 250L      // 静默这么久就重置（下一段说话重新起播）
         // AudioTrack 硬件缓冲（上限，不是常驻延迟）：给它足够空间吸收突发
         private const val PLAYBACK_BUFFER_FRAMES = 8
         // 真正决定延迟的是"在飞帧数"目标：3 帧 ≈ 60ms。太小会 underrun，太大会迟滞（像被拉长）
         private const val PLAYBACK_TARGET_FRAMES = 3
+        // ── 说话圈（判据 = 解码后真实音频能量，不是"收到包"）──
+        private const val RING_THRESHOLD_DB_DEFAULT = -40.0  // 门限默认 -40 dBFS
+        private const val RING_HANGOVER_MS = 250L            // 静音这么久才灭圈（防逐字闪）
+        private const val RING_PUBLISH_MIN_MS = 40L          // 状态最多 25Hz 推一次
+        const val RING_THRESHOLD_DB_MIN = -60.0
+        const val RING_THRESHOLD_DB_MAX = -15.0
     }
 
     private val audioConfig = AudioConfig()
@@ -116,6 +129,22 @@ class AudioBridge(
 
     private val _isLocalVoiceActive = MutableStateFlow(false)
     val isLocalVoiceActive: StateFlow<Boolean> = _isLocalVoiceActive.asStateFlow()
+
+    // ── 说话圈：谁"真的有声音"（按解码后的 PCM 能量，不是"收到包"）──
+    @Volatile private var ringThresholdDb: Double = RING_THRESHOLD_DB_DEFAULT
+    /** userId -> 最近一次电平超过门限的时刻（墙钟 ms） */
+    private val userAudibleAt = ConcurrentHashMap<Int, Long>()
+    /** userId -> 平滑后的电平（dBFS），用于挑"最响的那个"和诊断 */
+    private val userLevelDb = ConcurrentHashMap<Int, Double>()
+    private val _speakingUserIds = MutableStateFlow<Set<Int>>(emptySet())
+    /** 当前"在说话"的用户（能量判据 + 250ms 保持） */
+    val speakingUserIds: StateFlow<Set<Int>> = _speakingUserIds.asStateFlow()
+    private val _loudestSpeakerId = MutableStateFlow<Int?>(null)
+    /** 当前最响的说话人（悬浮窗用它决定显示谁） */
+    val loudestSpeakerId: StateFlow<Int?> = _loudestSpeakerId.asStateFlow()
+    private var ringPublishLastMs = 0L
+    /** 本地（自己）麦克风最近一次超门限的时刻 */
+    @Volatile private var localAudibleAtMs = 0L
 
     // ── 音频焦点：防止被其他 App（音乐/导航）duck 或抢占 ──
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -252,12 +281,11 @@ class AudioBridge(
                     break
                 }
                 if (read == FRAME_SIZE_SAMPLES && !_isMuted.value) {
-                    var energy = 0L
-                    for (i in 0 until read) {
-                        energy += buffer[i].toLong() * buffer[i].toLong()
-                    }
-                    val rms = Math.sqrt(energy.toDouble() / read)
-                    val isVoiceActive = rms > 150.0 // Adjusted threshold for voice activity
+                    // 本地圈用同一把尺子（同一个门限值）：麦克风 dBFS + 250ms 保持
+                    val micDb = frameDbfs(buffer, read)
+                    val nowMs = System.currentTimeMillis()
+                    if (micDb > ringThresholdDb) localAudibleAtMs = nowMs
+                    val isVoiceActive = nowMs - localAudibleAtMs <= RING_HANGOVER_MS
                     _isLocalVoiceActive.value = isVoiceActive
                     
                     val pcmBytes = shortsToBytes(buffer)
@@ -357,6 +385,9 @@ class AudioBridge(
                 // 协程可能在别的线程恢复，逐次确认实时优先级
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
 
+                // 说话圈：每时隙判定一次（能量 + 250ms 保持），没人说话时也能把圈灭掉
+                publishSpeakingRings()
+
                 val nowNs = System.nanoTime()
                 if (nowNs < nextSlotNs) {
                     // delay 只有 (Long) 和 (Duration) 两个重载：向上取整到 ms，靠绝对时隙自纠偏
@@ -431,14 +462,82 @@ class AudioBridge(
                 lastDup = dupTotal; lastLost = lostTotal; lastPlc = plcTotal; lastResync = resyncTotal
                 val pend = userJitter.values.sumOf { it.pendingSize() }
                 val head = try { audioTrack?.playbackHeadPosition?.toLong() ?: -1L } catch (_: Exception) { -1L }
+                // 自适应抖动缓冲的当前档位（所有用户取最大目标深度）与抖动估计
+                val jbTarget = userJitter.values.maxOfOrNull { it.targetSlots() } ?: 0
+                val jitterMs = userJitter.values.maxOfOrNull { it.jitterMs() } ?: 0.0
                 Log.i(TAG,
                     "audio stats: recv=${recvDelta}/s played=${playedDelta}/s dup=${dupD}/s lost=${lostD}/s plc=${plcD}/s " +
-                        "resync=${resyncD}/s pending=$pend buf=${bufferedFrames()}f written=$writtenFrames head=$head " +
+                        "resync=${resyncD}/s pending=$pend jb=${jbTarget}x20ms jit=${jitterMs.toInt()}ms " +
+                        "buf=${bufferedFrames()}f written=$writtenFrames head=$head " +
                         "loop=$loopTicks werr=$writeErrors herr=$headErrors track=$trackCreates " +
                         "state=${try { audioTrack?.state } catch (_: Exception) { -9 }} " +
                         "sess=${try { audioTrack?.audioSessionId } catch (_: Exception) { -9 }}")
             }
         }
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // 说话圈：按"解码后的真实音频能量"判定谁在说话（dBFS，16bit 满量程 = 0dBFS）
+    // ─────────────────────────────────────────────────────────
+
+    /** 一帧 PCM 的电平（dBFS）。全静音返回 -120 */
+    private fun frameDbfs(pcm: ShortArray, samples: Int): Double {
+        if (samples <= 0) return -120.0
+        var sum = 0.0
+        for (i in 0 until samples) {
+            val v = pcm[i].toDouble()
+            sum += v * v
+        }
+        val rms = kotlin.math.sqrt(sum / samples)
+        if (rms <= 1.0) return -120.0
+        return 20.0 * kotlin.math.log10(rms / 32768.0)
+    }
+
+    /** 解码出一帧真实 PCM 后记录能量（只有真实帧算，PLC 补出来的帧不算） */
+    private fun noteDecodedEnergy(userId: Int, pcm: ShortArray, samples: Int) {
+        val db = frameDbfs(pcm, samples)
+        val prev = userLevelDb[userId]
+        userLevelDb[userId] = if (prev == null) db else prev * 0.7 + db * 0.3
+        if (db > ringThresholdDb) userAudibleAt[userId] = System.currentTimeMillis()
+    }
+
+    /** 设置说话圈门限（dBFS，越小越灵敏） */
+    fun setRingThresholdDb(db: Double) {
+        val v = db.coerceIn(RING_THRESHOLD_DB_MIN, RING_THRESHOLD_DB_MAX)
+        if (v == ringThresholdDb) return
+        ringThresholdDb = v
+        Log.i(TAG, "说话圈门限 = ${v.toInt()} dBFS")
+    }
+
+    /** 每 20ms 时隙推一次"谁在说话"：只在集合变化时写 StateFlow，避免 Compose 被拖着重组 */
+    private fun publishSpeakingRings() {
+        val now = System.currentTimeMillis()
+        if (now - ringPublishLastMs < RING_PUBLISH_MIN_MS) return
+        ringPublishLastMs = now
+        val cutoff = now - RING_HANGOVER_MS
+        val speaking = HashSet<Int>(4)
+        var loudest: Int? = null
+        var loudestDb = Double.NEGATIVE_INFINITY
+        val it = userAudibleAt.entries.iterator()
+        while (it.hasNext()) {
+            val e = it.next()
+            if (e.value >= cutoff) {
+                speaking.add(e.key)
+                val lv = userLevelDb[e.key] ?: -120.0
+                if (lv > loudestDb) {
+                    loudestDb = lv
+                    loudest = e.key
+                }
+            } else if (now - e.value > 10_000L) {
+                it.remove()                  // 很久没声音的用户：清掉，别让表无限长
+                userLevelDb.remove(e.key)
+            }
+        }
+        if (_speakingUserIds.value != speaking) {
+            _speakingUserIds.value = speaking
+            Log.i(TAG, "说话圈: 在说=$speaking 最响=$loudest 门限=${ringThresholdDb.toInt()}dBFS")
+        }
+        if (_loudestSpeakerId.value != loudest) _loudestSpeakerId.value = loudest
     }
 
     /** 应用增益并写入 AudioTrack（阻塞写，天然限速到实时） */
@@ -492,6 +591,21 @@ class AudioBridge(
         private var plcTicks = 0
         private var lastPcm: ShortArray? = null
 
+        // ── 自适应抖动缓冲的状态 ──────────────────────────────
+        /** 本段说话是否已预填充完成（每段只填一次） */
+        private var prefillDone = false
+        /** 本段第一帧到达时间（预填充超时兜底用） */
+        private var burstStartMs = 0L
+        /** 上一次到达时间与抖动指数平均（|间隔-20ms|） */
+        private var arrivalLastMs = 0L
+        private var jitterEwmaMs = 0.0
+        /** 目标缓冲深度（时隙数，1~JB_MAX_TARGET_SLOTS） */
+        private var targetSlots = JB_MIN_TARGET_SLOTS
+        /** 适配节拍：上次统计、上次降档时间、上次 PLC 数 */
+        private var lastAdaptMs = 0L
+        private var lastShrinkMs = 0L
+        private var lastAdaptPlc = 0L
+
         @Volatile var lastRecvMs = 0L
         var dupDropped = 0L
         var lostCount = 0L
@@ -500,34 +614,122 @@ class AudioBridge(
 
         fun pendingSize(): Int = pending.size
 
+        /** 诊断用：当前目标深度（时隙） */
+        fun targetSlots(): Int = targetSlots
+
+        /** 诊断用：抖动估计（ms） */
+        fun jitterMs(): Double = jitterEwmaMs
+
+        /** 从 nextExpected 起连续可播的帧数 */
+        private fun contiguousDepth(): Int {
+            var d = 0
+            var id = nextExpected
+            while (d < 32 && pending.containsKey(id)) {
+                d++
+                id = (id + 1) and 0xFFFF
+            }
+            return d
+        }
+
         fun submit(packetId: Int, data: ByteArray) {
-            lastRecvMs = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            lastRecvMs = now
+            if (arrivalLastMs != 0L && packetId >= 0) {
+                val interval = (now - arrivalLastMs).toDouble()
+                if (interval <= FRAME_SIZE_MS * 8) {
+                    // 只在"连续说话"的到达间隔里测抖动：相对 20ms 的偏差做指数平均
+                    val dev = kotlin.math.abs(interval - FRAME_SIZE_MS)
+                    jitterEwmaMs = (jitterEwmaMs * 0.9 + dev * 0.1).coerceAtMost(JB_JITTER_MAX_MS)
+                } else {
+                    // 长间隔 = 停顿/换段，不是抖动：让它自然衰减，别把停顿算成 800ms 抖动
+                    jitterEwmaMs *= 0.7
+                }
+            }
+            arrivalLastMs = now
+
             if (nextExpected < 0) {
                 nextExpected = if (packetId >= 0) packetId and 0xFFFF else 0
+                burstStartMs = now
+                prefillDone = false
             }
             val id = if (packetId >= 0) packetId and 0xFFFF else nextExpected
             val delta = (id - nextExpected) and 0xFFFF
+            // 接收窗口随目标深度放宽：目标越深，"近未来"要收得越远
+            val fwd = (targetSlots + 4) * 2
             when {
-                delta < JB_MAX_DEPTH * 2 -> {              // 正是期望的，或近未来（乱序早到）
+                delta < fwd -> {                             // 期望的 / 乱序早到的
                     if (pending.putIfAbsent(id, data) != null) dupDropped++
                 }
-                delta >= 0x8000 -> dupDropped++             // 过期/重复包
-                else -> {                                   // 远期跳变：重同步（换人/包号回绕）
+                delta >= 0x8000 -> dupDropped++              // 过期/重复包
+                else -> {                                    // 远期跳变：重同步（换人/包号回绕）
                     resyncCount++
                     pending.clear()
                     pending[id] = data
                     nextExpected = id
+                    prefillDone = false
+                    burstStartMs = now
                 }
+            }
+            // 保险：缓冲堆太多说明有长缺口，直接对齐到最新（避免延迟无限增长）
+            if (pending.size > JB_MAX_PENDING) {
+                resyncCount++
+                val newest = pending.lastKey()
+                pending.clear()
+                pending[newest] = data
+                nextExpected = newest
+                prefillDone = false
+                burstStartMs = now
             }
         }
 
-        /** 产出当前 20ms 时隙的 PCM：真实帧 / PLC 帧 / null */
+        /** 每秒一次的深度自适应：抖动测量兜底 + 补帧快升 / 长时间干净才慢降 */
+        private fun adapt(now: Long) {
+            if (now - lastAdaptMs < JB_ADAPT_INTERVAL_MS) return
+            lastAdaptMs = now
+            val plcDelta = (plcCount - lastAdaptPlc).toInt()
+            lastAdaptPlc = plcCount
+            // 实测抖动（到达间隔偏离 20ms 的量）直接映射成"最低深度"：
+            // jit≈20ms → 2 档 + 1 档余量 = 3 档(60ms)。这样不靠"丢了才反应"，而是提前托住。
+            val jitterFloor = (kotlin.math.ceil(jitterEwmaMs / FRAME_SIZE_MS).toInt() + 1)
+                .coerceIn(JB_MIN_TARGET_SLOTS, JB_MAX_TARGET_SLOTS)
+            if (plcDelta >= 3) {
+                // 快升：这一秒补了 3 帧以上，说明还是等不够
+                if (targetSlots < JB_MAX_TARGET_SLOTS) {
+                    targetSlots++
+                    Log.i(TAG, "JB(user=$userId) 补帧多(plc=${plcDelta}/s, jit=${jitterEwmaMs.toInt()}ms) → 目标深度 ${targetSlots} 时隙(${targetSlots * 20}ms)")
+                }
+                lastShrinkMs = now
+            } else if (plcDelta == 0 && targetSlots > jitterFloor && now - lastShrinkMs >= JB_SHRINK_IDLE_MS) {
+                // 慢降：干净满 JB_SHRINK_IDLE_MS 且仍高于抖动下限，才回落一档
+                targetSlots--
+                Log.i(TAG, "JB(user=$userId) 线路干净 → 目标深度 ${targetSlots} 时隙(${targetSlots * 20}ms)")
+                lastShrinkMs = now
+            }
+            if (targetSlots < jitterFloor) {
+                // 抖动变大：不等到丢包就把深度托到下限
+                targetSlots = jitterFloor
+                Log.i(TAG, "JB(user=$userId) 抖动 ${jitterEwmaMs.toInt()}ms → 托底到 ${targetSlots} 时隙(${targetSlots * 20}ms)")
+            }
+        }
+
+        /** 产出当前 20ms 时隙的 PCM：真实帧 / PLC 帧 / null（静音，让混音去写） */
         fun produceTick(): ShortArray? {
             if (nextExpected < 0) return null
-            if (pending.isEmpty() && System.currentTimeMillis() - lastRecvMs > JB_IDLE_RESET_MS) {
+            val now = System.currentTimeMillis()
+            if (pending.isEmpty() && now - lastRecvMs > JB_IDLE_RESET_MS) {
                 reset()
                 return null
             }
+            adapt(now)
+
+            // 预填充：一段说话先屯够 targetSlots 帧再出声（这段是抗抖动用的延迟）
+            if (!prefillDone) {
+                if (contiguousDepth() < targetSlots && now - burstStartMs < JB_PREFILL_TIMEOUT_MS) {
+                    return null
+                }
+                prefillDone = true
+            }
+
             val data = pending.remove(nextExpected)
             if (data != null) {
                 waitTicks = 0
@@ -539,15 +741,24 @@ class AudioBridge(
                 }
                 return pcm
             }
-            // 缺包：先等 JB_WAIT_TICKS 个时隙；仍没有就判丢并跳到已知的下一个包
-            if (waitTicks < JB_WAIT_TICKS) {
+            // 缺包：等待窗口跟目标深度走（深度越深，愿意等越久）
+            val waitMax = (targetSlots - 1).coerceAtLeast(JB_MIN_WAIT_TICKS)
+            if (waitTicks < waitMax) {
                 waitTicks++
                 plcCount++
                 return plcFrame()
             }
+            // 等够了：判丢。只有缺口确实拉大（下一包离得远）才跳号，否则原地多等一拍
             lostCount++
             waitTicks = 0
-            nextExpected = if (pending.isNotEmpty()) pending.firstKey() else (nextExpected + 1) and 0xFFFF
+            val nextAvail = pending.firstKey()
+            val gap = (nextAvail - nextExpected) and 0xFFFF
+            if (gap in 1..(targetSlots + 2)) {
+                // 只差一点：继续等这一包，别跳（跳号会把连续语音切断）
+                plcCount++
+                return plcFrame()
+            }
+            nextExpected = nextAvail
             plcCount++
             return plcFrame()
         }
@@ -577,6 +788,8 @@ class AudioBridge(
             val pcmBytes = decoder.decode(data)
             decodeBuffer.fill(0)
             bytesToShorts(pcmBytes, decodeBuffer)
+            // 说话圈判据：解码后的真实 PCM 能量（不是"收到包"）
+            noteDecodedEnergy(userId, decodeBuffer, (pcmBytes.size / 2).coerceAtMost(FRAME_SIZE_SAMPLES))
             decodeBuffer
         } catch (_: Exception) {
             null
@@ -588,6 +801,9 @@ class AudioBridge(
             waitTicks = 0
             plcTicks = 0
             lastPcm = null
+            // 抖动用的是"到达间隔"而非缓冲状态，这里不重置；但一段新说话开始时
+            // prefill 会重新屯一次，所以清掉 arrivalLastMs 避免跨段的假间隔
+            arrivalLastMs = 0L
         }
     }
     /**
@@ -610,6 +826,7 @@ class AudioBridge(
         recvFrames++
         // 拷贝一份：native 层若复用同一个 ByteArray，存引用会被后续帧覆盖
         userJitter.getOrPut(userId) { JitterBuffer(userId) }.submit(packetId, opusData.copyOf())
+        publishSpeakingRings()
     }
 
     fun setMuted(muted: Boolean) {
@@ -628,6 +845,10 @@ class AudioBridge(
         // When output is muted, clear all queued audio so nothing plays
         if (muted) {
             userJitter.values.forEach { it.reset() }
+            // 静音了就不该还有圈
+            userAudibleAt.clear()
+            _speakingUserIds.value = emptySet()
+            _loudestSpeakerId.value = null
         }
     }
 

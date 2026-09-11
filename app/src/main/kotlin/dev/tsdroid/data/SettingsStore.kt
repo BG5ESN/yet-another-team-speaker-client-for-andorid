@@ -17,6 +17,7 @@ private val KEY_AUTO_LOAD_IMAGES = booleanPreferencesKey("auto_load_images")
 private val KEY_LANGUAGE = stringPreferencesKey("language")
 private val KEY_ENABLE_FLOATING_WINDOW = booleanPreferencesKey("enable_floating_window")
 private val KEY_NOISE_SUPPRESSION = booleanPreferencesKey("noise_suppression")
+private val KEY_RING_THRESHOLD_DB = floatPreferencesKey("ring_threshold_db")
 
 class SettingsStore(private val context: Context) {
 
@@ -60,5 +61,13 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setNoiseSuppression(enabled: Boolean) {
         context.settingsDataStore.edit { it[KEY_NOISE_SUPPRESSION] = enabled }
+    }
+
+    /** 说话圈门限（dBFS，默认 -40）：说话圈/悬浮窗按这个门限判"谁在说话" */
+    val ringThresholdDb: Flow<Float> = context.settingsDataStore.data
+        .map { it[KEY_RING_THRESHOLD_DB] ?: -40f }
+
+    suspend fun setRingThresholdDb(db: Float) {
+        context.settingsDataStore.edit { it[KEY_RING_THRESHOLD_DB] = db }
     }
 }

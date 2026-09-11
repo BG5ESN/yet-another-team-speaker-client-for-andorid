@@ -96,7 +96,6 @@ import dev.tsdroid.viewmodel.DownloadState
 import dev.tsdroid.viewmodel.FileAttachment
 import dev.tsdroid.viewmodel.ServerViewModel
 import kotlinx.coroutines.flow.StateFlow
-import dev.tsdroid.service.WhisperManager
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -137,9 +136,6 @@ fun ServerScreen(
     var messageText by remember { mutableStateOf("") }
     var pmTargetId by remember { mutableStateOf<Int?>(null) }
 
-    // Whisper (瀵嗚亰) state 鈥?read directly from WhisperManager
-    val whisperTargetNames = WhisperManager.whisperTargetNames
-    val whisperFirstTargetName = whisperTargetNames.firstOrNull()
 
     // Resolve pmTarget User from users list
     val pmTarget = pmTargetId?.let { id -> users.find { it.id == id } }
@@ -323,27 +319,6 @@ fun ServerScreen(
                         )
                     }
 
-                    // Whisper (瀵嗚亰) indicator 鈥?shows active state, click to stop
-                    if (WhisperManager.isWhisperActive && whisperFirstTargetName != null) {
-                        IconButton(onClick = { viewModel.toggleWhisper(WhisperManager.whisperTargets.first()) }) {
-                            Icon(
-                                Icons.Default.Forum,
-                                contentDescription = "鍋滄瀵嗚亰",
-                                tint = Color(0xFF4CAF50),
-                            )
-                        }
-                    } else {
-                        IconButton(
-                            onClick = {},
-                            enabled = false,
-                        ) {
-                            Icon(
-                                Icons.Default.Forum,
-                                contentDescription = "瀵嗚亰",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                            )
-                        }
-                    }
 
                     // Toggle Output Mute (Deafen)
                     IconButton(onClick = { viewModel.toggleOutputMute() }) {
@@ -374,7 +349,6 @@ fun ServerScreen(
                     chatOpen = true
                 },
                 onUserLongClick = { user -> viewModel.toggleMuteUser(user.id) },
-                onWhisperClick = { userId -> viewModel.toggleWhisper(userId) },
                 mutedUserIds = mutedUserIds,
                 channelIcons = channelIcons,
                 userAvatars = userAvatars,
@@ -452,13 +426,9 @@ fun ServerScreen(
                         onSelectPmUser = { userId -> pmTargetId = userId },
                         onClearPmTarget = { pmTargetId = null },
                         onSend = {
-                            if (WhisperManager.isWhisperActive && whisperFirstTargetName != null) {
-                                viewModel.sendWhisperMessage(messageText)
-                            } else {
-                                when (chatTab) {
-                                    0 -> viewModel.sendChannelMessage(messageText)
-                                    1 -> pmTargetId?.let { viewModel.sendPrivateMessage(it, messageText) }
-                                }
+                            when (chatTab) {
+                                0 -> viewModel.sendChannelMessage(messageText)
+                                1 -> pmTargetId?.let { viewModel.sendPrivateMessage(it, messageText) }
                             }
                             messageText = ""
                         },
@@ -473,8 +443,6 @@ fun ServerScreen(
                             viewModel.uploadAndSendFile(fileName, data, chatTab == 1, pmTargetId)
                         },
                         onDownload = { attachment -> viewModel.downloadAttachment(attachment) },
-                        isWhisperActive = WhisperManager.isWhisperActive,
-                        whisperTargetName = whisperFirstTargetName,
                     )
                 }
             }
@@ -534,8 +502,6 @@ fun ChatPanel(
     canUploadFiles: Boolean = true,
     onUploadFile: (String, ByteArray) -> Unit = { _, _ -> },
     onDownload: ((FileAttachment) -> StateFlow<DownloadState>)? = null,
-    isWhisperActive: Boolean = false,
-    whisperTargetName: String? = null,
 ) {
     val context = LocalContext.current
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -653,32 +619,6 @@ fun ChatPanel(
                 }
             }
 
-            // Whisper mode indicator
-            if (isWhisperActive && whisperTargetName != null) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            Icons.Default.Forum,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = "瀵嗚亰 ${whisperTargetName}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
-                    }
-                }
-            }
 
             // Messages
             val messages = when (chatTab) {
@@ -705,7 +645,7 @@ fun ChatPanel(
                 if (canUploadFiles) {
                     IconButton(
                         onClick = { filePickerLauncher.launch("*/*") },
-                        enabled = (chatTab == 0 || pmTarget != null) && !isWhisperActive,
+                        enabled = chatTab == 0 || pmTarget != null,
                     ) {
                         Icon(Icons.Default.AttachFile, contentDescription = stringResource(R.string.attach_file))
                     }
@@ -717,15 +657,13 @@ fun ChatPanel(
                     placeholder = {
                         Text(
                             when {
-                                isWhisperActive && whisperTargetName != null ->
-                                    "瀵嗚亰 ${whisperTargetName}..."
                                 chatTab == 0 -> stringResource(R.string.message_channel_placeholder)
                                 else -> stringResource(R.string.message_private_placeholder, pmTarget?.nickname ?: "?")
                             }
                         )
                     },
                     singleLine = true,
-                    enabled = chatTab == 0 || pmTarget != null || (isWhisperActive && whisperTargetName != null),
+                    enabled = chatTab == 0 || pmTarget != null,
                     colors = OutlinedTextFieldDefaults.colors(
                         unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                         focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
@@ -735,7 +673,7 @@ fun ChatPanel(
                 )
                 IconButton(
                     onClick = onSend,
-                    enabled = messageText.isNotBlank() && (chatTab == 0 || pmTarget != null || (isWhisperActive && whisperTargetName != null)),
+                    enabled = messageText.isNotBlank() && (chatTab == 0 || pmTarget != null),
                 ) {
                     Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.send))
                 }

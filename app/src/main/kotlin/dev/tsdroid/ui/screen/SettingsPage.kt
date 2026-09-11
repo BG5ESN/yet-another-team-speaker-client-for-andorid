@@ -52,6 +52,10 @@ fun SettingsPage(
     val enableFloatingWindow by settingsStore.enableFloatingWindow.collectAsStateWithLifecycle(initialValue = false)
     val noiseSuppression by settingsStore.noiseSuppression.collectAsStateWithLifecycle(initialValue = true)
     val audioGain by settingsStore.audioGain.collectAsStateWithLifecycle(initialValue = 1.0f)
+    val persistedRingDb by settingsStore.ringThresholdDb.collectAsStateWithLifecycle(initialValue = -40f)
+    // 拖动期间用本地值显示（避免与持久化来回打架），松手才落盘
+    var dragRingDb by remember { mutableStateOf<Float?>(null) }
+    val ringDb = dragRingDb ?: persistedRingDb
 
     val languageOptions = listOf(
         "zh" to stringResource(R.string.language_simplified_chinese),
@@ -139,6 +143,25 @@ fun SettingsPage(
                         onValueChange = { scope.launch { settingsStore.setAudioGain(it) } },
                         valueRange = 1.0f..8.0f,
                         steps = 13,
+                    )
+                }
+
+                // 说话圈门限（dBFS）：频道树头像圈 + 悬浮窗气泡都按它判"谁在说话"
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    Text(
+                        text = "${stringResource(R.string.ring_threshold)} : ${ringDb.toInt()} dBFS",
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Slider(
+                        value = ringDb,
+                        onValueChange = { dragRingDb = it },
+                        onValueChangeFinished = {
+                            dragRingDb?.let { v -> scope.launch { settingsStore.setRingThresholdDb(v) } }
+                            dragRingDb = null
+                        },
+                        valueRange = -60f..-15f,
+                        steps = 44,
                     )
                 }
 
