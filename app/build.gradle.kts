@@ -12,8 +12,8 @@ android {
         applicationId = "com.yuaxi.ts6droid.cn"
         minSdk = 29
         targetSdk = 35
-        versionCode = 9
-        versionName = "2.1.4-Han"
+        versionCode = 10
+        versionName = "2.1.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

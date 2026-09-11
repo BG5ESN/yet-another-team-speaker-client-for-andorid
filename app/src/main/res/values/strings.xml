@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- App -->
-    <string name="app_name">TS6 Droid</string>
+    <string name="app_name">TS3</string>
     <string name="language_simplified_chinese">简体中文</string>
     <string name="language_english">English</string>
     <string name="language_french">Français</string>

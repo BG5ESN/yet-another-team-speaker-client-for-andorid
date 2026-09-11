@@ -56,7 +56,6 @@ fun ChannelTree(
     val safeUsers = remember(users) { users.filterNotNull() }
     val treeItems = remember(channels, safeUsers) {
         val items = buildTreeItems(channels, safeUsers)
-        Log.d("ChannelTree", "Built ${items.size} tree items (${items.count { it is TreeItem.ChannelNode }} channels, ${items.count { it is TreeItem.UserNode }} users) from ${channels.size} channels, ${safeUsers.size} users")
         items
     }
     val userCountByChannel = remember(safeUsers) {
@@ -201,7 +200,6 @@ private fun buildTreeItems(channels: List<Channel>, users: List<User>): List<Tre
     val tree = JChannelTree.fromChannels(safeChannels.toTypedArray())
     val usersByChannel = safeUsers.groupBy { it.channelId }
 
-    Log.d("ChannelTree", "usersByChannel keys: ${usersByChannel.keys}, channel ids: ${safeChannels.map { it.id }}")
 
     val items = mutableListOf<TreeItem>()
 

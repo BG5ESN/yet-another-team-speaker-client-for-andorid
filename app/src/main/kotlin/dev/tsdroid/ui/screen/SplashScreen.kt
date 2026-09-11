@@ -8,8 +8,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.tsdroid.han.R
 import kotlinx.coroutines.delay
 
 @Composable
@@ -32,7 +34,7 @@ fun SplashScreen(onReady: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
             Text(
-                text = "TS6 Droid",
+                text = stringResource(R.string.app_name),
                 style = MaterialTheme.typography.headlineLarge,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary,

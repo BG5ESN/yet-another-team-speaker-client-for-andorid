@@ -48,6 +48,8 @@ class TsClient {
         private const val DISCONNECT_MIN_FLUSH_MS = 500L
         private const val DISCONNECT_MAX_FLUSH_MS = 2_000L
         private const val DISCONNECT_POLL_MS = 20L
+        /** refreshState 的最小间隔：事件循环每批事件都刷会把主线程拖满（见 refreshState 注释） */
+        private const val REFRESH_MIN_INTERVAL_MS = 200L
     }
 
     @Volatile
@@ -155,7 +157,7 @@ class TsClient {
                         client = c
                         pendingClient = null
                         _state.value = ConnectionState.CONNECTED
-                        refreshState()
+                        refreshState(force = true)
                         if (client == null) {
                             throw IllegalStateException("Connection closed during initial state sync")
                         }
@@ -227,6 +229,8 @@ class TsClient {
     fun startEventLoop() {
         // 1. Cancel any active event loop cleanly first
         stopEventLoop()
+        // 去重缓存清零：新连接/重连后第一帧状态必须落下去
+        resetRefreshCache()
 
         // 2. Launch a completely fresh lifecycle track
         eventLoopJob = clientCoroutineScope.launch {
@@ -319,24 +323,77 @@ class TsClient {
                 val hints = (event.data["permission_hints"] as? Number)?.toLong() ?: return
                 Log.i(TAG, "Channel $channelId permissions updated: ${hints.toString(16)}")
                 // Force refresh to propagate updated permission_hints
-                refreshState()
+                refreshState(force = true)
             }
         }
     }
 
-    private fun refreshState() {
+    // —— 刷新节流 + 内容去重（2026-09 修主线程 30% CPU 空转）——
+    // 原实现：事件循环每批事件（或每 500ms）都调 refreshState()，而 native 侧每次返回的都是
+    // 新的 Java 对象（dev.tslib.Channel/User 没实现 equals），StateFlow 一律判定"值变了"，
+    // 于是 ViewModel 的 combine 和整棵 Compose 树被拖着以 ~70 次/秒 重组，主线程烧掉 30%。
+    // 现在：>=200ms 才刷一次，且按内容摘要判断，内容没变就不写 StateFlow（不触发重组）。
+    @Volatile private var lastRefreshMs = 0L
+    private var lastChannelsKey = ""
+    private var lastUsersKey = ""
+
+    /** 断线/重连后清掉去重缓存，保证下一轮一定刷新 */
+    private fun resetRefreshCache() {
+        lastRefreshMs = 0L
+        lastChannelsKey = ""
+        lastUsersKey = ""
+    }
+
+    private fun refreshState(force: Boolean = false) {
         val c = client ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - lastRefreshMs < REFRESH_MIN_INTERVAL_MS) return
+        lastRefreshMs = now
         try {
-            _channels.value = c.channels?.filterNotNull() ?: emptyList()
-            val rawUsers = c.users
-            val filteredUsers = rawUsers?.filterNotNull() ?: emptyList()
-            Log.d(TAG, "refreshState: rawUsers=${rawUsers?.size}, filtered=${filteredUsers.size}")
-            if (filteredUsers.isNotEmpty()) {
-                for (u in filteredUsers) {
-                    Log.d(TAG, "  user: ${u.nickname} id=${u.id} ch=${u.channelId}")
+            val chans = c.channels?.filterNotNull() ?: emptyList()
+            // 内容摘要必须覆盖全部可见字段：漏字段的后果是"变了但不刷新 UI"
+            val chansKey = buildString {
+                for (ch in chans) {
+                    append(ch.id).append(':').append(ch.parentId).append(':').append(ch.name)
+                        .append(':').append(ch.topic).append(':').append(ch.description)
+                        .append(':').append(ch.order).append(':').append(ch.isPermanent)
+                        .append(':').append(ch.isSemiPermanent).append(':').append(ch.isDefault)
+                        .append(':').append(ch.hasPassword).append(':').append(ch.codec)
+                        .append(':').append(ch.codecQuality).append(':').append(ch.maxClients)
+                        .append(':').append(ch.maxFamilyClients).append(':').append(ch.neededTalkPower)
+                        .append(':').append(ch.iconId).append(':').append(ch.permissionHints).append('|')
                 }
             }
-            _users.value = filteredUsers
+            if (chansKey != lastChannelsKey) {
+                lastChannelsKey = chansKey
+                _channels.value = chans
+            }
+
+            val users = c.users?.filterNotNull() ?: emptyList()
+            val usersKey = buildString {
+                for (u in users) {
+                    append(u.id).append(':').append(u.uid).append(':').append(u.databaseId)
+                        .append(':').append(u.channelId).append(':').append(u.nickname)
+                        .append(':').append(u.clientType)
+                        .append(if (u.isTalking) ":T" else ":-")
+                        .append(if (u.isInputMuted) "M" else "-")
+                        .append(if (u.isOutputMuted) "O" else "-")
+                        .append(if (u.hasInputHardware) "I" else "-")
+                        .append(if (u.hasOutputHardware) "O" else "-")
+                        .append(if (u.isAway) "A" else "-")
+                        .append(if (u.isRecording) "R" else "-")
+                        .append(if (u.isPrioritySpeaker) "P" else "-")
+                        .append(if (u.isChannelCommander) "C" else "-")
+                        .append(if (u.isTalker) "K" else "-")
+                        .append(':').append(u.talkPower).append(':').append(u.awayMessage)
+                        .append(':').append(u.serverGroups?.size ?: 0).append('|')
+                }
+            }
+            if (usersKey != lastUsersKey) {
+                lastUsersKey = usersKey
+                _users.value = users
+            }
+
             _serverInfo.value = c.serverInfo
             cachedClientId = c.clientId
             val st = c.state

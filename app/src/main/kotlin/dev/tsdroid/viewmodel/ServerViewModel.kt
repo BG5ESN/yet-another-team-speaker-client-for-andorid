@@ -42,6 +42,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -217,16 +218,16 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             combine(_channels, _rawUsers) { channels, users ->
                 val myId = tsClient?.clientId
-                Log.d(TAG, "PermCheck: tsClient=${tsClient != null}, clientId=$myId, channels=${channels.size}, users=${users.size}")
                 if (myId == null) return@combine null
-                val channelId = users.find { it.id == myId }?.channelId
-                if (channelId == null) { Log.d(TAG, "PermCheck: user not found in users list"); return@combine null }
+                val channelId = users.find { it.id == myId }?.channelId ?: return@combine null
                 val hints = channels.find { it.id == channelId }?.permissionHints ?: 0L
-                Log.d(TAG, "PermCheck: channelId=$channelId, hints=$hints")
                 channelId to hints
-            }.collect { pair ->
+            }
+                // 只关心 (channelId, hints) 的变化：上游每次刷新都送新对象，
+                // 不去重的话这里会被拖着每帧跑一遍（曾把主线程拖到 30% CPU）
+                .distinctUntilChanged()
+                .collect { pair ->
                 val (channelId, hints) = pair ?: return@collect
-                Log.d(TAG, "PermCheck collect: channelId=$channelId, hints=$hints, queried=${queriedPermChannels}")
                 if (hints == 0L && channelId !in queriedPermChannels) {
                     queriedPermChannels.add(channelId)
                     Log.i(TAG, "No permission hints for channel $channelId, querying permoverview...")
