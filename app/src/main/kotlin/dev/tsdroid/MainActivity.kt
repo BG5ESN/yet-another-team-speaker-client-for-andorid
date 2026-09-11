@@ -16,7 +16,6 @@ import dev.tsdroid.viewmodel.ConnectionViewModel
 import dev.tsdroid.ui.theme.TsDroidTheme
 import dev.tsdroid.ui.screen.AppNavigation
 import dev.tsdroid.ui.screen.SplashScreen
-import dev.tsdroid.ui.component.AnimeWallpaperState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -46,9 +45,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             var showSplash by remember { mutableStateOf(true) }
-            val seedColor = AnimeWallpaperState.dominantColor.value
 
-            TsDroidTheme(seedColor = if (showSplash) null else seedColor) {
+            TsDroidTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     if (showSplash) {
                         SplashScreen(onReady = { showSplash = false })
