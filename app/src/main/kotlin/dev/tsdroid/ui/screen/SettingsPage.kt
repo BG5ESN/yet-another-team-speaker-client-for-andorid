@@ -226,8 +226,6 @@ fun SettingsPage(
                     onClick = onNavigateToAbout,
                 )
 
-                // 检查更新
-                UpdateCheckRow(context)
             }
         }
 
@@ -297,103 +295,4 @@ private fun SettingsClickableRow(
         Text(text = label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
         trailing()
     }
-}
-
-// ── 检查更新 ──
-
-@Composable
-private fun UpdateCheckRow(context: Context) {
-    val scope = rememberCoroutineScope()
-    val versionName = try {
-        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: ""
-    } catch (_: Exception) { "" }
-    var isCheckingUpdate by remember { mutableStateOf(false) }
-    var updateInfo by remember { mutableStateOf<dev.tsdroid.update.UpdateInfo?>(null) }
-    var updateError by remember { mutableStateOf<String?>(null) }
-    var showUpdateDialog by remember { mutableStateOf(false) }
-    var isLatestVersion by remember { mutableStateOf(false) }
-    var isDownloading by remember { mutableStateOf(false) }
-    var downloadProgress by remember { mutableFloatStateOf(0f) }
-    var downloadError by remember { mutableStateOf<String?>(null) }
-
-    if (showUpdateDialog && updateInfo != null) {
-        AlertDialog(
-            onDismissRequest = { if (!isDownloading) { showUpdateDialog = false } },
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-            title = { Text(stringResource(R.string.update_available, updateInfo!!.versionName)) },
-            text = {
-                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    if (isDownloading) {
-                        Text("${stringResource(R.string.update_downloading)} ${(downloadProgress * 100).toInt()}%", style = MaterialTheme.typography.bodyMedium)
-                        Spacer(Modifier.height(8.dp))
-                        LinearProgressIndicator(progress = { downloadProgress }, modifier = Modifier.fillMaxWidth())
-                        downloadError?.let {
-                            Spacer(Modifier.height(8.dp))
-                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                        }
-                    } else {
-                        val changelog = updateInfo!!.changelog
-                        Text(
-                            text = changelog.take(2000).ifBlank { stringResource(R.string.update_no_changelog) },
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                if (!isDownloading) {
-                    FilledTonalButton(onClick = {
-                        isDownloading = true
-                        downloadError = null
-                        downloadProgress = 0f
-                        scope.launch {
-                            dev.tsdroid.update.InAppUpdater.downloadAndInstall(
-                                context = context,
-                                downloadUrl = updateInfo!!.downloadUrl,
-                                onProgress = { progress ->
-                                    downloadProgress = progress.progress
-                                    if (progress.state == dev.tsdroid.update.InAppUpdater.DownloadState.FAILED) {
-                                        downloadError = progress.error
-                                        isDownloading = false
-                                    } else if (progress.state == dev.tsdroid.update.InAppUpdater.DownloadState.DONE) {
-                                        showUpdateDialog = false
-                                    }
-                                }
-                            )
-                            isDownloading = false
-                        }
-                    }) { Text(stringResource(R.string.update_download)) }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showUpdateDialog = false }) { Text(stringResource(R.string.update_later)) }
-            },
-        )
-    }
-
-    SettingsClickableRow(
-        label = stringResource(R.string.update_check),
-        onClick = {
-            if (!isCheckingUpdate) {
-                isCheckingUpdate = true; isLatestVersion = false; updateInfo = null; updateError = null
-                scope.launch {
-                    val result = dev.tsdroid.update.UpdateChecker.checkForUpdate(versionName)
-                    updateInfo = result.update
-                    updateError = result.error
-                    if (result.update != null) showUpdateDialog = true
-                    else if (result.error == null) isLatestVersion = true
-                    isCheckingUpdate = false
-                }
-            }
-        },
-        trailing = {
-            when {
-                isCheckingUpdate -> CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                updateInfo != null -> Text(stringResource(R.string.update_found), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                updateError != null -> Text(updateError!!, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                isLatestVersion -> Text(stringResource(R.string.update_already_latest), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                else -> {}
-            }
-        },
-    )
 }

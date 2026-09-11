@@ -64,14 +64,6 @@
     <string name="section_audio">音频</string>
     <string name="section_chat">聊天</string>
     <string name="section_more">更多</string>
-    <string name="update_check">点击检查更新</string>
-    <string name="update_found">发现新版本</string>
-    <string name="update_already_latest">已是最新版本</string>
-    <string name="update_available">发现新版本 %1$s</string>
-    <string name="update_download">立即更新</string>
-    <string name="update_downloading">正在下载</string>
-    <string name="update_later">稍后再说</string>
-    <string name="update_no_changelog">暂无更新说明</string>
     <string name="close">关闭</string>
     <string name="filter_all">全部</string>
     <string name="message_channel_placeholder">频道消息…</string>
@@ -135,18 +127,5 @@
     <!-- AboutScreen -->
     <string name="about_software">关于软件 / About</string>
     <string name="about_back">← 返回</string>
-    <string name="about_credits_title">致谢与开发源流</string>
-    <string name="about_credits_desc">本项目基于 Grégory D 的优秀开源项目进行深度汉化、本地化适配与功能二次开发。由衷感谢原作者对开源语音社区做出的杰出贡献！</string>
-    <string name="about_enhancement_title">汉化与二次开发声明</string>
-    <string name="about_enhancement_desc">本版本由 yuaxi 进行全文本深度汉化，全面重构了系统兼容性代码以修复多项底层挂机闪退问题。同时，针对移动端常驻战术语音挂机场景，独家二次开发新增了【全新极简半透明常驻悬浮窗控制台】等核心功能，大幅度优化了电竞与游戏过程中的开麦/静音交互体验。</string>
-    <string name="about_license_title">开源许可证协议 (License)</string>
-    <string name="about_license_desc">本项目严格遵循 GNU GPLv3 (GNU General Public License v3) 开源许可证协议。这意味着任何个人或团队基于本项目修改、衍生出的任何再分发版本，都必须强制性保持完全开源，且必须无条件沿用 GPLv3 协议，同时必须完整保留原作者 (Grégory D) 与二开汉化作者 (yuaxi) 的版权署名。严禁任何形式的闭源打包、二次加密或暗中牟利！</string>
-    <string name="about_repo_title">官方源码仓库与持续更新</string>
-    <string name="about_repo_desc">本项目的完整源代码、后续的正式版本功能迭代、体验优化以及紧急 Bug 修复补丁，均会第一时间在我的官方 GitHub 仓库中独立发布。欢迎前往点星(Star)关注、反馈 Issues 或提交 PR：</string>
-    <string name="about_repo_link">🔗 点击访问 yuaxi 的 GitHub 开源仓库地址</string>
-    <string name="about_warning_title">⚠️ 谨防受骗（郑重免责声明）</string>
-    <string name="about_warning_desc">本程序属于纯公益、非盈利性质的开源技术交流产物，完全免费，完全开源！严禁任何形式的商业兜售、打包买断或捆绑卡密收费行为。如果您是通过付费渠道（如二手机器人、各大交易平台、收费代下等）购买获得本软件，说明您已被骗！请立即向平台发起侵权退款维权，并前往官方开源仓库实名举报倒卖黑商！</string>
-    <string name="about_contributors_title">贡献者</string>
-    <string name="about_contributions_count">%1$d 次贡献</string>
-    <string name="contributors_load_error">加载失败</string>
+    <string name="about_internal_note">内部使用版本 · 基于上游 GPLv3 开源项目修改</string>
 </resources>

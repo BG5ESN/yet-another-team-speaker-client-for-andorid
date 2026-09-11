@@ -65,14 +65,6 @@
     <string name="section_audio">Audio</string>
     <string name="section_chat">Chat</string>
     <string name="section_more">Plus</string>
-    <string name="update_check">Vérifier les mises à jour</string>
-    <string name="update_found">Nouvelle version disponible</string>
-    <string name="update_already_latest">Déjà à jour</string>
-    <string name="update_available">Nouvelle version %1$s disponible</string>
-    <string name="update_download">Mettre à jour</string>
-    <string name="update_downloading">Téléchargement en cours</string>
-    <string name="update_later">Plus tard</string>
-    <string name="update_no_changelog">Aucun journal de modifications</string>
     <string name="close">Fermer</string>
     <string name="filter_all">Tous</string>
     <string name="message_channel_placeholder">Message channel\u2026</string>
@@ -136,18 +128,5 @@
     <!-- AboutScreen -->
     <string name="about_software">À propos / About</string>
     <string name="about_back">← Retour</string>
-    <string name="about_credits_title">Crédits &amp; Origines</string>
-    <string name="about_credits_desc">Ce projet est basé sur l\'excellent projet open-source de Grégory D, avec une localisation approfondie et des améliorations de fonctionnalités. Un grand merci à l\'auteur original pour ses contributions exceptionnelles à la communauté vocale open-source !</string>
-    <string name="about_enhancement_title">Déclaration de Localisation &amp; Amélioration</string>
-    <string name="about_enhancement_desc">Cette version propose une localisation en texte intégral par yuaxi, ainsi qu\'une refonte complète du code de compatibilité système pour résoudre plusieurs problèmes de plantage en arrière-plan. De plus, pour le cas d\'utilisation des communications vocales tactiques sur mobile, un développement secondaire exclusif a ajouté des fonctionnalités de base telles que la [Console Flottante Translucide Minimaliste], optimisant considérablement l\'expérience d\'interaction micro/muet pendant l\'e-sport et les jeux.</string>
-    <string name="about_license_title">Licence Open Source (GPLv3)</string>
-    <string name="about_license_desc">Ce projet suit strictement la licence open-source GNU GPLv3 (GNU General Public License v3). Cela signifie que tout individu ou équipe modifiant ou dérivant des redistributions de ce projet DOIT le garder entièrement open-source, adopter inconditionnellement la licence GPLv3, et conserver l\'attribution des droits d\'auteur de l\'auteur original (Grégory D) et du développeur secondaire (yuaxi). Toute forme de redistribution en source fermée, de chiffrement secondaire ou de profit secret est strictement interdite !</string>
-    <string name="about_repo_title">Dépôt Source Officiel &amp; Mises à jour</string>
-    <string name="about_repo_desc">Le code source complet de ce projet, les itérations officielles des fonctionnalités, les optimisations de l\'expérience et les correctifs d\'urgence seront publiés en priorité et de manière indépendante sur mon dépôt GitHub officiel. N\'hésitez pas à mettre une étoile (Star), à suivre, à signaler des problèmes (Issues) ou à soumettre des PR :</string>
-    <string name="about_repo_link">🔗 Cliquez pour visiter le dépôt GitHub open-source de yuaxi</string>
-    <string name="about_warning_title">⚠️ Avertissement de Fraude</string>
-    <string name="about_warning_desc">Ce programme est un produit purement bénévole et à but non lucratif destiné à l\'échange technique open-source. Il est entièrement GRATUIT et entièrement OPEN-SOURCE ! Toute forme de vente commerciale, d\'achat groupé ou de facturation via des codes d\'activation est strictement interdite. Si vous avez obtenu ce logiciel via des canaux payants (tels que des bots de revente, des plateformes de trading, des services de téléchargement payants, etc.), vous avez été victime d\'une arnaque ! Veuillez immédiatement lancer une demande de remboursement pour infraction sur la plateforme, et rendez-vous sur le dépôt open-source officiel pour signaler les revendeurs au marché noir !</string>
-    <string name="about_contributors_title">Contributeurs</string>
-    <string name="about_contributions_count">%1$d contributions</string>
-    <string name="contributors_load_error">Échec du chargement</string>
+    <string name="about_internal_note">Version interne · dérivée du projet open source GPLv3 en amont</string>
 </resources>
