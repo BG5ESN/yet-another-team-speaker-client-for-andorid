@@ -17,6 +17,13 @@ class TsDroidApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // 崩溃抓手：只做取证（Java 未捕获异常 + 上次进程死因），不改任何业务行为。
+        // 放在最前面，保证连接/Rust 初始化之前就位。
+        try {
+            CrashCatcher.install(this)
+        } catch (t: Throwable) {
+            android.util.Log.w("TS3CRASH", "崩溃抓手安装失败", t)
+        }
         // 把 Application context 交给 Rust 侧 ndk-context（幂等，装过一次就跳过）。
         // 新版底层 tsclientlib 用 hickory-resolver 解析服务器地址，Android 上
         // 必须拿到 Context 才能读系统 DNS，否则会在连接时 panic → 闪退。
