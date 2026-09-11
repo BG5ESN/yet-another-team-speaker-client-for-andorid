@@ -87,7 +87,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.tsdroid.han.R
 import dev.tslib.ConnectionState
 import dev.tslib.User
-import dev.tsdroid.ui.component.AnimeBackground
 import dev.tsdroid.ui.component.ChannelTree
 import dev.tsdroid.ui.component.ChatView
 import dev.tsdroid.ui.component.FileManagerDialog
@@ -122,7 +121,6 @@ fun ServerScreen(
     val showLinkThumbnails by viewModel.showLinkThumbnails.collectAsStateWithLifecycle()
     val autoLoadImages by viewModel.autoLoadImages.collectAsStateWithLifecycle()
     val enableFloatingWindow by viewModel.enableFloatingWindow.collectAsStateWithLifecycle()
-    val animeBackground by viewModel.animeBackground.collectAsStateWithLifecycle()
     val noiseSuppression by viewModel.noiseSuppression.collectAsStateWithLifecycle()
     val mutedUserIds by viewModel.mutedUserIds.collectAsStateWithLifecycle()
     val fileManagerOpen by viewModel.fileManagerOpen.collectAsStateWithLifecycle()
@@ -193,8 +191,6 @@ fun ServerScreen(
     val totalUnread = unreadChannel + totalUnreadPrivate
 
     Box(modifier = Modifier.fillMaxSize()) {
-        AnimeBackground(enabled = animeBackground)
-
         Scaffold(
             containerColor = Color.Transparent,
         topBar = {

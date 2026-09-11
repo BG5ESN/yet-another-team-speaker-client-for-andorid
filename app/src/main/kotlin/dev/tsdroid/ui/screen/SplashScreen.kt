@@ -8,46 +8,17 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import dev.tsdroid.ui.component.AnimeWallpaperState
 import kotlinx.coroutines.delay
 
 @Composable
 fun SplashScreen(onReady: () -> Unit) {
-    val context = LocalContext.current
-    var showContent by remember { mutableStateOf(false) }
-    val url by AnimeWallpaperState.currentUrl
-    val dominantColor by AnimeWallpaperState.dominantColor
-
+    // 固定 600ms 进主界面。原来要等随机壁纸下载完成 + 取图主色（最长 3 秒），
+    // 壁纸功能已整体移除，这里不再有任何网络请求。
     LaunchedEffect(Unit) {
-        AnimeWallpaperState.ensureFetched(context)
-    }
-
-    LaunchedEffect(url) {
-        if (url != null) {
-            delay(800)
-            showContent = true
-        }
-    }
-
-    // Safety timeout: if no URL after 3s, proceed anyway (cached fallback handles it)
-    LaunchedEffect(Unit) {
-        delay(3000)
-        if (!showContent) {
-            showContent = true
-        }
-    }
-
-    LaunchedEffect(showContent, dominantColor) {
-        if (showContent && dominantColor != null) {
-            delay(600)
-            onReady()
-        } else if (showContent && dominantColor == null) {
-            delay(1500)
-            onReady()
-        }
+        delay(600)
+        onReady()
     }
 
     Box(
@@ -67,11 +38,9 @@ fun SplashScreen(onReady: () -> Unit) {
                 color = MaterialTheme.colorScheme.primary,
             )
 
-            if (!showContent) {
-                CircularProgressIndicator(
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
+            CircularProgressIndicator(
+                color = MaterialTheme.colorScheme.primary,
+            )
         }
     }
 }

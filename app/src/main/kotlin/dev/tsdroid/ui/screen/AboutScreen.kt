@@ -22,7 +22,6 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import dev.tsdroid.data.SettingsStore
 import dev.tsdroid.han.R
-import dev.tsdroid.ui.component.AnimeBackground
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -40,7 +39,6 @@ fun AboutScreen(onBack: () -> Unit) {
     val repoUrl = "https://github.com/YUAXI/TS6_Droid_CN"
     val scrollState = rememberScrollState()
     val settingsStore = remember { SettingsStore(context) }
-    val animeBackground by settingsStore.animeBackground.collectAsStateWithLifecycle(initialValue = true)
 
     var contributors by remember { mutableStateOf<List<GitHubContributor>>(emptyList()) }
     var isLoadingContributors by remember { mutableStateOf(true) }
@@ -74,8 +72,6 @@ fun AboutScreen(onBack: () -> Unit) {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        AnimeBackground(enabled = animeBackground)
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
