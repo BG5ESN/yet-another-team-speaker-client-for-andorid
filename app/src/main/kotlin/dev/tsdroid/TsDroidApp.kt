@@ -17,6 +17,10 @@ class TsDroidApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // 把 Application context 交给 Rust 侧 ndk-context（幂等，装过一次就跳过）。
+        // 新版底层 tsclientlib 用 hickory-resolver 解析服务器地址，Android 上
+        // 必须拿到 Context 才能读系统 DNS，否则会在连接时 panic → 闪退。
+        dev.tslib.Client.nativeSetAndroidContext(applicationContext)
         createNotificationChannels()
     }
 

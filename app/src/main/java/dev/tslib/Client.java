@@ -334,6 +334,13 @@ public class Client implements AutoCloseable {
     }
 
     // Native methods
+    /**
+     * 把 Application context 交给 Rust 侧的 ndk-context（App 启动时调用一次）。
+     * 新版底层（hickory-resolver）在 Android 上要靠它读系统 DNS，
+     * 未初始化时解析地址会直接 panic 导致闪退。
+     */
+    public static native void nativeSetAndroidContext(Object context);
+
     private static native long nativeCreate(String address, long identityPtr,
                                              String nickname, String password,
                                              String channel);

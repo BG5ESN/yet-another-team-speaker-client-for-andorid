@@ -20,6 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import android.content.Intent
+import android.media.AudioManager
 import android.provider.Settings
 import dev.tsdroid.service.TsConnectionService
 
@@ -43,6 +44,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // 播放走 USAGE_GAME → 媒体音量通道，音量键也绑到这里
+        volumeControlStream = AudioManager.STREAM_MUSIC
         setContent {
             var showSplash by remember { mutableStateOf(true) }
 

@@ -158,12 +158,14 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
             when (event.type) {
                 "audio_received" -> {
                     val userId = (event.data["user_id"] as? Number)?.toInt() ?: return@onEach
+                    // 语音包序号：用来去重/重排（老 .so 没这个字段时传 -1）
+                    val packetId = (event.data["packet_id"] as? Number)?.toInt() ?: -1
                     val data = event.data["data"]
                     if (data is ByteArray) {
-                        audioBridge.playAudio(userId, data)
+                        audioBridge.playAudio(userId, packetId, data)
                     } else if (data is Array<*>) {
                         val bytes = ByteArray(data.size) { (data[it] as? Number)?.toByte() ?: 0 }
-                        audioBridge.playAudio(userId, bytes)
+                        audioBridge.playAudio(userId, packetId, bytes)
                     }
                 }
                 "talk_status_start" -> {
