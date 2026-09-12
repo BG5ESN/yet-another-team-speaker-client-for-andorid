@@ -142,47 +142,60 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                 val speaker = speakerId?.let { id -> users.firstOrNull { u -> u.id == id } }
                 if (speakerId == overlayState.activeSpeakerId) return@onEach
 
+                // ⚠️ 这里不能无条件 cancel + 重建防抖 job。上游是
+                //    combine(users, loudestSpeakerId)，而 users 每 500ms 刷新一次、内容摘要里
+                //    含 isTalking —— 有人说话时它一直在变，于是每次触发都把刚建的 job 杀掉重建，
+                //    500ms 的等待被反复重置、任务永远跑不完：该清的清不掉（悬浮窗卡在最后说话的
+                //    那个人身上），该显示的也显示不出来。只在"目标真的变了"时才重建。
                 if (speakerId != null) {
-                    overlayState.speakerUpdateJob?.cancel()          // 有人说话：防抖后更新
-                    overlayState.pendingSpeakerId = speakerId
-                    overlayState.speakerUpdateJob = serviceScope.launch {
-                        delay(SPEAKER_DELAY_MS)
-                        if (overlayState.pendingSpeakerId == speakerId) {
-                            overlayState.activeSpeakerId = speakerId
-                            overlayState.activeSpeakerName = findUserNickname(speakerId)
-                            val uid = speaker?.uid
-                            // 先看服务器给的头像标记（client_flag_avatar）：为空就是"这个人没设头像"，
-                            // 此时请求 /avatar_xxx 服务器会回 0x0806 FileInvalidPath —— 不要问不存在的文件
-                            val hasAvatar = !uid.isNullOrEmpty() && !speaker?.avatarId.isNullOrEmpty()
-                            if (hasAvatar) {
-                                val cached = avatarCache.getAvatar(uid!!)
-                                overlayState.activeSpeakerAvatar = cached
-                                if (cached == null) {
-                                    // 失败最多重试 MAX_RETRIES 次（不再每次说话都 clearMemoryCache 重来一遍）
-                                    serviceScope.launch(Dispatchers.IO) {
-                                        avatarCache.loadAvatar(uid, tsClient)
-                                        val avatar = avatarCache.getAvatar(uid)
-                                        withContext(Dispatchers.Main) {
-                                            if (overlayState.activeSpeakerId == speakerId) {
-                                                overlayState.activeSpeakerAvatar = avatar
+                    if (overlayState.pendingSpeakerId != speakerId) {   // 换人了（含从没人到有人）
+                        overlayState.pendingSpeakerId = speakerId
+                        overlayState.speakerUpdateJob?.cancel()
+                        overlayState.speakerUpdateJob = serviceScope.launch {
+                            delay(SPEAKER_DELAY_MS)
+                            if (overlayState.pendingSpeakerId == speakerId) {
+                                Log.i(TAG, "悬浮窗说话人 -> $speakerId (${findUserNickname(speakerId)})")
+                                overlayState.activeSpeakerId = speakerId
+                                overlayState.activeSpeakerName = findUserNickname(speakerId)
+                                val uid = speaker?.uid
+                                // 先看服务器给的头像标记（client_flag_avatar）：为空就是"这个人没设头像"，
+                                // 此时请求 /avatar_xxx 服务器会回 0x0806 FileInvalidPath —— 不要问不存在的文件
+                                val hasAvatar = !uid.isNullOrEmpty() && !speaker?.avatarId.isNullOrEmpty()
+                                if (hasAvatar) {
+                                    val cached = avatarCache.getAvatar(uid!!)
+                                    overlayState.activeSpeakerAvatar = cached
+                                    if (cached == null) {
+                                        // 失败最多重试 MAX_RETRIES 次（不再每次说话都 clearMemoryCache 重来一遍）
+                                        serviceScope.launch(Dispatchers.IO) {
+                                            avatarCache.loadAvatar(uid, tsClient)
+                                            val avatar = avatarCache.getAvatar(uid)
+                                            withContext(Dispatchers.Main) {
+                                                if (overlayState.activeSpeakerId == speakerId) {
+                                                    overlayState.activeSpeakerAvatar = avatar
+                                                }
                                             }
                                         }
                                     }
+                                } else {
+                                    overlayState.activeSpeakerAvatar = null
                                 }
-                            } else {
-                                overlayState.activeSpeakerAvatar = null
                             }
                         }
                     }
                 } else {
-                    overlayState.pendingSpeakerId = null             // 没人说话：防抖后清空
-                    overlayState.speakerUpdateJob?.cancel()
-                    overlayState.speakerUpdateJob = serviceScope.launch {
-                        delay(SPEAKER_DELAY_MS)
-                        if (overlayState.pendingSpeakerId == null) {
-                            overlayState.activeSpeakerId = null
-                            overlayState.activeSpeakerName = null
-                            overlayState.activeSpeakerAvatar = null
+                    // 只有"从有人变成没人"才需要重建清空 job；已经处于"没人"状态就别再扰动它，
+                    // 否则上面说的那个重置问题会让清空永远不执行。
+                    if (overlayState.pendingSpeakerId != null) {
+                        overlayState.pendingSpeakerId = null
+                        overlayState.speakerUpdateJob?.cancel()
+                        overlayState.speakerUpdateJob = serviceScope.launch {
+                            delay(SPEAKER_DELAY_MS)
+                            if (overlayState.pendingSpeakerId == null) {
+                                Log.i(TAG, "悬浮窗说话人 -> 清空（没人说话）")
+                                overlayState.activeSpeakerId = null
+                                overlayState.activeSpeakerName = null
+                                overlayState.activeSpeakerAvatar = null
+                            }
                         }
                     }
                 }
