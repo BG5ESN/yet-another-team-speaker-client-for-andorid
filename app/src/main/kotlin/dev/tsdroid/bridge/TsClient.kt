@@ -64,6 +64,14 @@ class TsClient {
         private set
 
     private val _events = MutableSharedFlow<Event>(extraBufferCapacity = 64)
+
+    /**
+     * 事件通道因缓冲满而被丢弃的累计条数。
+     * tryEmit 在缓冲满时返回 false 并**静默丢弃** —— 以前丢了完全无声，
+     * 真出问题（比如聊天少一条消息）时连"是不是丢在通道里"都无从判断。
+     * 这里只记数 + 节流打日志，不改变丢弃行为（改行为要重估整条链路）。
+     */
+    private val droppedEvents = java.util.concurrent.atomic.AtomicLong(0)
     val events: SharedFlow<Event> = _events.asSharedFlow()
 
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
@@ -235,7 +243,13 @@ class TsClient {
                         val c = client ?: break
                         val events = c.processEvents() ?: emptyArray()
                         for (event in events) {
-                            _events.tryEmit(event)
+                            if (!_events.tryEmit(event)) {
+                                // 缓冲满（订阅者消费不过来）。记数 + 每 100 条打一次，避免刷屏
+                                val n = droppedEvents.incrementAndGet()
+                                if (n == 1L || n % 100L == 0L) {
+                                    Log.w(TAG, "事件通道已满，丢弃 type=${event.type}（累计丢 $n 条）")
+                                }
+                            }
                             handleEvent(event)
                         }
                         refreshCounter++

@@ -264,7 +264,15 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
             viewModelScope.launch {
                 service.tsClient.state.collect { _connectionState.value = it }
             }
-            viewModelScope.launch {
+            // 消费端原来跑在主线程（viewModelScope 默认 Main），主线程一忙（Compose 重组、
+            // 布局、GC）就消费不过来，通道缓冲攒满 64 条后新事件被静默丢掉 —— 丢的可能就是
+            // text_message。解析是纯逻辑、状态写入是 StateFlow（线程安全），所以把消费挪到
+            // Default 线程，让主线程不再成为这条链路的瓶颈。
+            //
+            // ⚠️ 必须用 launch(Dispatchers.Default)，**不能**写成 events.flowOn(...)：
+            //    flowOn 对 SharedFlow 不生效（Operator Fusion，SharedFlow 没有上游），
+            //    Kotlin 会以 deprecation 报错；即使压掉警告也是静默无效，消费仍在主线程。
+            viewModelScope.launch(Dispatchers.Default) {
                 service.tsClient.events.collect { handleEvent(it) }
             }
             viewModelScope.launch {
