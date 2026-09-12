@@ -62,7 +62,6 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
         private const val NOTIFICATION_ID = 1
         private const val ACTION_DISCONNECT = "com.flammedemon.ts6droid.DISCONNECT"
         private const val ACTION_TOGGLE_MUTE = "com.flammedemon.ts6droid.TOGGLE_MUTE"
-        private const val SPEAKER_DELAY_MS = 500L
         private const val AVATAR_REFRESH_INTERVAL_MS = 30000L // 30 seconds
 
         var instance: TsConnectionService? = null
@@ -142,62 +141,41 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                 val speaker = speakerId?.let { id -> users.firstOrNull { u -> u.id == id } }
                 if (speakerId == overlayState.activeSpeakerId) return@onEach
 
-                // ⚠️ 这里不能无条件 cancel + 重建防抖 job。上游是
-                //    combine(users, loudestSpeakerId)，而 users 每 500ms 刷新一次、内容摘要里
-                //    含 isTalking —— 有人说话时它一直在变，于是每次触发都把刚建的 job 杀掉重建，
-                //    500ms 的等待被反复重置、任务永远跑不完：该清的清不掉（悬浮窗卡在最后说话的
-                //    那个人身上），该显示的也显示不出来。只在"目标真的变了"时才重建。
+                // 立即切换，不做防抖 —— 这里原来还有一层 500ms 的 delay，属于**重复防抖**：
+                // 源头 loudestSpeakerId 已经带了 250ms 保持（AudioBridge 的 RING_HANGOVER_MS），
+                // "字与字之间的间隙让 icon 闪"这件事在源头就兜住了。再叠 500ms 的结果是
+                // 悬浮窗要近 600ms 才反应过来（实测反馈"反应好慢"）。
                 if (speakerId != null) {
-                    if (overlayState.pendingSpeakerId != speakerId) {   // 换人了（含从没人到有人）
-                        overlayState.pendingSpeakerId = speakerId
-                        overlayState.speakerUpdateJob?.cancel()
-                        overlayState.speakerUpdateJob = serviceScope.launch {
-                            delay(SPEAKER_DELAY_MS)
-                            if (overlayState.pendingSpeakerId == speakerId) {
-                                Log.i(TAG, "悬浮窗说话人 -> $speakerId (${findUserNickname(speakerId)})")
-                                overlayState.activeSpeakerId = speakerId
-                                overlayState.activeSpeakerName = findUserNickname(speakerId)
-                                val uid = speaker?.uid
-                                // 先看服务器给的头像标记（client_flag_avatar）：为空就是"这个人没设头像"，
-                                // 此时请求 /avatar_xxx 服务器会回 0x0806 FileInvalidPath —— 不要问不存在的文件
-                                val hasAvatar = !uid.isNullOrEmpty() && !speaker?.avatarId.isNullOrEmpty()
-                                if (hasAvatar) {
-                                    val cached = avatarCache.getAvatar(uid!!)
-                                    overlayState.activeSpeakerAvatar = cached
-                                    if (cached == null) {
-                                        // 失败最多重试 MAX_RETRIES 次（不再每次说话都 clearMemoryCache 重来一遍）
-                                        serviceScope.launch(Dispatchers.IO) {
-                                            avatarCache.loadAvatar(uid, tsClient)
-                                            val avatar = avatarCache.getAvatar(uid)
-                                            withContext(Dispatchers.Main) {
-                                                if (overlayState.activeSpeakerId == speakerId) {
-                                                    overlayState.activeSpeakerAvatar = avatar
-                                                }
-                                            }
-                                        }
+                    Log.i(TAG, "悬浮窗说话人 -> $speakerId (${findUserNickname(speakerId)})")
+                    overlayState.activeSpeakerId = speakerId
+                    overlayState.activeSpeakerName = findUserNickname(speakerId)
+                    val uid = speaker?.uid
+                    // 先看服务器给的头像标记（client_flag_avatar）：为空就是"这个人没设头像"，
+                    // 此时请求 /avatar_xxx 服务器会回 0x0806 FileInvalidPath —— 不要问不存在的文件
+                    val hasAvatar = !uid.isNullOrEmpty() && !speaker?.avatarId.isNullOrEmpty()
+                    if (hasAvatar) {
+                        val cached = avatarCache.getAvatar(uid!!)
+                        overlayState.activeSpeakerAvatar = cached
+                        if (cached == null) {
+                            // 头像只能异步补：先亮出身份（名字），加载完若还是他在说就换上头像
+                            serviceScope.launch(Dispatchers.IO) {
+                                avatarCache.loadAvatar(uid, tsClient)
+                                val avatar = avatarCache.getAvatar(uid)
+                                withContext(Dispatchers.Main) {
+                                    if (overlayState.activeSpeakerId == speakerId) {
+                                        overlayState.activeSpeakerAvatar = avatar
                                     }
-                                } else {
-                                    overlayState.activeSpeakerAvatar = null
                                 }
                             }
                         }
+                    } else {
+                        overlayState.activeSpeakerAvatar = null
                     }
                 } else {
-                    // 只有"从有人变成没人"才需要重建清空 job；已经处于"没人"状态就别再扰动它，
-                    // 否则上面说的那个重置问题会让清空永远不执行。
-                    if (overlayState.pendingSpeakerId != null) {
-                        overlayState.pendingSpeakerId = null
-                        overlayState.speakerUpdateJob?.cancel()
-                        overlayState.speakerUpdateJob = serviceScope.launch {
-                            delay(SPEAKER_DELAY_MS)
-                            if (overlayState.pendingSpeakerId == null) {
-                                Log.i(TAG, "悬浮窗说话人 -> 清空（没人说话）")
-                                overlayState.activeSpeakerId = null
-                                overlayState.activeSpeakerName = null
-                                overlayState.activeSpeakerAvatar = null
-                            }
-                        }
-                    }
+                    Log.i(TAG, "悬浮窗说话人 -> 清空（没人说话）")
+                    overlayState.activeSpeakerId = null
+                    overlayState.activeSpeakerName = null
+                    overlayState.activeSpeakerAvatar = null
                 }
             }
             .launchIn(serviceScope)
@@ -217,35 +195,24 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
             updateOverlayChannelName()
         }.launchIn(serviceScope)
         
-        // Listen to local voice activity and apply delay mechanism
+        // 本地说话：直接映射，不做防抖（源头 audioBridge.isLocalVoiceActive 已带 250ms 保持）
         audioBridge.isLocalVoiceActive.onEach { isSpeaking ->
-            // Cancel any pending local speaking state change
-            overlayState.localSpeakingJob?.cancel()
-            overlayState.pendingLocalSpeaking = isSpeaking
-            
-            // Delay local speaking state update to avoid flickering
-            overlayState.localSpeakingJob = serviceScope.launch {
-                delay(SPEAKER_DELAY_MS)
-                // Only update if still the pending state
-                if (overlayState.pendingLocalSpeaking == isSpeaking) {
-                    overlayState.delayedLocalSpeaking = isSpeaking
-                    
-                    // Force refresh local user avatar when speaking starts
-                    if (isSpeaking) {
-                        val myId = tsClient.clientId
-                        val localUser = tsClient.users.value.find { it.id == myId }
-                        val localUid = localUser?.uid
-                        if (!localUid.isNullOrEmpty()) {
-                            serviceScope.launch(Dispatchers.IO) {
-                                // Force refresh local avatar
-                                avatarCache.clearMemoryCache(localUid)
-                                avatarCache.loadAvatar(localUid, tsClient)
-                                val avatar = avatarCache.getAvatar(localUid)
-                                withContext(Dispatchers.Main) {
-                                    if (overlayState.activeSpeakerId == myId) {
-                                        overlayState.activeSpeakerAvatar = avatar
-                                    }
-                                }
+            overlayState.delayedLocalSpeaking = isSpeaking
+
+            // Force refresh local user avatar when speaking starts
+            if (isSpeaking) {
+                val myId = tsClient.clientId
+                val localUser = tsClient.users.value.find { it.id == myId }
+                val localUid = localUser?.uid
+                if (!localUid.isNullOrEmpty()) {
+                    serviceScope.launch(Dispatchers.IO) {
+                        // Force refresh local avatar
+                        avatarCache.clearMemoryCache(localUid)
+                        avatarCache.loadAvatar(localUid, tsClient)
+                        val avatar = avatarCache.getAvatar(localUid)
+                        withContext(Dispatchers.Main) {
+                            if (overlayState.activeSpeakerId == myId) {
+                                overlayState.activeSpeakerAvatar = avatar
                             }
                         }
                     }
@@ -540,18 +507,10 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                 val isOutputMuted by audioBridge.isOutputMuted.collectAsStateWithLifecycle()
                 val isLocalVoiceActive by audioBridge.isLocalVoiceActive.collectAsStateWithLifecycle()
                 
-                // Listen to local voice activity and apply delay mechanism
+                // 本地说话直接映射：源头已有 250ms 保持，这里原来又 delay 一次
+                // （和上层的 500ms 叠起来总计上秒），是第三层重复延迟
                 LaunchedEffect(isLocalVoiceActive) {
-                    // Cancel any pending local speaking state change
-                    overlayState.localSpeakingJob?.cancel()
-                    overlayState.pendingLocalSpeaking = isLocalVoiceActive
-                    
-                    // Delay local speaking state update to avoid flickering
-                    delay(SPEAKER_DELAY_MS)
-                    // Only update if still the pending state
-                    if (overlayState.pendingLocalSpeaking == isLocalVoiceActive) {
-                        overlayState.delayedLocalSpeaking = isLocalVoiceActive
-                    }
+                    overlayState.delayedLocalSpeaking = isLocalVoiceActive
                 }
                 
                 FloatingOverlayContent(
