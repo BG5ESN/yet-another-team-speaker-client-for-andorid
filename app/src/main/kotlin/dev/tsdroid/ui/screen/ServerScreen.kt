@@ -221,20 +221,37 @@ fun ServerScreen(
                     // 用 Initial 这一趟：事件从外往里走，父容器先看到，
                     // 这样即使手指落在列表/按钮上也照样能触发（子组件还没消费）。
                     awaitPointerEventScope {
-                        while (true) {
-                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                            val downCount = event.changes.count { it.pressed }
-                            if (!fullScreenPtt && downCount >= 2) {
-                                fullScreenPtt = true
-                                viewModel.setPushToTalk(true)
+                        // ⚠️ 必须区分"这次触摸序列是不是我们接管的"。
+                        //    绝不能无条件 consume 所有 downCount==0（全抬起）的事件 ——
+                        //    那会把子组件的 up 一并吃掉，底部 PTT 按钮的 tryAwaitRelease()
+                        //    永远等不到释放，说话就停不下来了（实测踩过）。
+                        var gestureOwned = false
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val downCount = event.changes.count { it.pressed }
+                                if (!gestureOwned && downCount >= 2) {
+                                    gestureOwned = true
+                                    fullScreenPtt = true
+                                    viewModel.setPushToTalk(true)
+                                }
+                                if (gestureOwned) {
+                                    // 只吃我们自己这一次手势：否则手指底下压着的按钮/列表
+                                    // 会照常响应（正巧按在"文件管理"图标上就把它点开了）
+                                    event.changes.forEach { it.consume() }
+                                }
+                                if (gestureOwned && downCount == 0) {
+                                    // 全部抬起才退出：两根手指抬起有先后，按"任一抬起"会误退
+                                    gestureOwned = false
+                                    fullScreenPtt = false
+                                    viewModel.setPushToTalk(false)
+                                }
                             }
-                            // mask 显示期间把事件全部吃掉：否则手指底下压着的按钮/列表
-                            // 还会照常响应（比如正巧按在"文件管理"图标上就把它点开了）。
-                            if (fullScreenPtt || downCount == 0) {
-                                event.changes.forEach { it.consume() }
-                            }
-                            if (fullScreenPtt && downCount == 0) {
-                                // 全部抬起才退出：两根手指抬起有先后，按"任一抬起"会误退
+                        } finally {
+                            // 协程被取消（切后台 / 离开界面 / 条件变化）时收尾，
+                            // 别把 PTT 留在"正在说话"
+                            if (gestureOwned) {
+                                gestureOwned = false
                                 fullScreenPtt = false
                                 viewModel.setPushToTalk(false)
                             }
