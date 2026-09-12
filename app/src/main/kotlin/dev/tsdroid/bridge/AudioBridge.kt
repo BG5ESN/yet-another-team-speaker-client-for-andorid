@@ -128,7 +128,6 @@ class AudioBridge(
     /** userId -> 最近一次电平超过门限的时刻（墙钟 ms） */
     private val userAudibleAt = ConcurrentHashMap<Int, Long>()
     /** userId -> 平滑后的电平（dBFS），用于挑"最响的那个"和诊断 */
-    private val userLevelDb = ConcurrentHashMap<Int, Double>()
     private val _speakingUserIds = MutableStateFlow<Set<Int>>(emptySet())
     /** 当前"在说话"的用户（能量判据 + 250ms 保持） */
     val speakingUserIds: StateFlow<Set<Int>> = _speakingUserIds.asStateFlow()
@@ -286,7 +285,10 @@ class AudioBridge(
                 }
                 if (read == FRAME_SIZE_SAMPLES && !_isMuted.value) {
                     // 本地圈用同一把尺子（同一个门限值）：麦克风 dBFS + 250ms 保持
-                    val micDb = frameDbfs(buffer, read)
+                    // 本地圈仍按麦克风能量：原始 PCM 本来就在手上，不必额外解码，
+                    // 而且和下面的 VA 发送门控共用同一个门限 —— 两边行为严格一致。
+                    // 公式与设置页"麦克风测试"、远端能量判据都是同一个 dbfsOf。
+                    val micDb = dbfsOf(buffer, read)
                     val nowMs = System.currentTimeMillis()
                     if (micDb > ringThresholdDb) localAudibleAtMs = nowMs
                     val isVoiceActive = nowMs - localAudibleAtMs <= RING_HANGOVER_MS
@@ -487,18 +489,29 @@ class AudioBridge(
     }
 
     // ─────────────────────────────────────────────────────────
-    // 说话圈：按"解码后的真实音频能量"判定谁在说话（dBFS，16bit 满量程 = 0dBFS）
+    // 说话圈：按"是否收到语音包"判定谁在说话（流判定）
+    //   · 远端：收到 audio_received 就标记（发送端已按 VAD 门控，见 noteRemotePacket）
+    //   · 本地：仍按麦克风能量（micDb > ringThresholdDb）—— 原始 PCM 本来就有，
+    //     不必额外解码，且与 VA 发送门控共用同一个门限，两边行为严格一致
     // ─────────────────────────────────────────────────────────
 
-    /** 一帧 PCM 的电平（dBFS）。实现在 LevelMeter.kt —— 与设置页的麦克风测试共用同一公式 */
-    private fun frameDbfs(pcm: ShortArray, samples: Int): Double = dbfsOf(pcm, samples)
-
-    /** 解码出一帧真实 PCM 后记录能量（只有真实帧算，PLC 补出来的帧不算） */
-    private fun noteDecodedEnergy(userId: Int, pcm: ShortArray, samples: Int) {
-        val db = frameDbfs(pcm, samples)
-        val prev = userLevelDb[userId]
-        userLevelDb[userId] = if (prev == null) db else prev * 0.7 + db * 0.3
-        if (db > ringThresholdDb) userAudibleAt[userId] = System.currentTimeMillis()
+    /**
+     * 收到一帧语音包 → 这个人在说话。
+     *
+     * 判据回到"**流**"，不再解码算能量。依据：发送端已经按 VAD 门控了
+     * （AudioBridge 里 shouldTransmitFrame 那一处）—— 不说话根本不会往频道里发流，
+     * 所以"收到包"就等价于"对方在说话"。当初流判定会"圈常亮、不跟人动"，根因正是
+     * 发送端无条件 50 包/秒地泼流，那个根因已经修掉了，判据本身没有问题。
+     *
+     * 换回流判定还顺手解决了两件事：
+     *  · **快** —— 能量判据要等 jitter buffer 攒够预填充再解码，圈会慢半拍；流判据收到即亮
+     *  · **省** —— 不必每帧解码后算 RMS，也就没有门限调参那套复杂度
+     *
+     * 在主线程（audio_received 事件）调用，userAudibleAt 是 ConcurrentHashMap，
+     * 播放线程并发读是安全的。
+     */
+    private fun noteRemotePacket(userId: Int, now: Long) {
+        userAudibleAt[userId] = now
     }
 
     /** 设置说话圈门限（dBFS，越小越灵敏） */
@@ -517,20 +530,21 @@ class AudioBridge(
         val cutoff = now - RING_HANGOVER_MS
         val speaking = HashSet<Int>(4)
         var loudest: Int? = null
-        var loudestDb = Double.NEGATIVE_INFINITY
+        var earliest = Long.MAX_VALUE
         val it = userAudibleAt.entries.iterator()
         while (it.hasNext()) {
             val e = it.next()
             if (e.value >= cutoff) {
                 speaking.add(e.key)
-                val lv = userLevelDb[e.key] ?: -120.0
-                if (lv > loudestDb) {
-                    loudestDb = lv
+                // "当前说话人"取**最早开始说的那个**（也是最近有包到达的）。
+                // 为什么不比能量：那要每帧解码算 RMS，而多人同时说话时按响度切换会来回跳；
+                // 先说的优先、他停了才轮到下一个，观感反而更稳。
+                if (e.value < earliest) {
+                    earliest = e.value
                     loudest = e.key
                 }
             } else if (now - e.value > 10_000L) {
                 it.remove()                  // 很久没声音的用户：清掉，别让表无限长
-                userLevelDb.remove(e.key)
             }
         }
         if (_speakingUserIds.value != speaking) {
@@ -578,16 +592,17 @@ class AudioBridge(
     }
 
     /**
-     * 解码一帧 Opus（JNI）并回写说话圈能量。
-     * 复用 decodeBuffer（只有真实帧算能量，PLC 补的不算），失败返回 null → 该帧按丢弃处理。
+     * 解码一帧 Opus（JNI）。
+     * 复用 decodeBuffer（只有真实帧会走这里，PLC 补的帧不经过），失败返回 null → 该帧按丢弃处理。
      * 只应在播放线程调用（userDecoders / decodeBuffer 都不是线程安全的）。
+     *
+     * 注意：说话圈现在由 noteRemotePacket() 在"收到包"时就标记了，这里不再回写能量。
      */
     private fun decodePacket(userId: Int, data: ByteArray): ShortArray? = try {
         val decoder = userDecoders.getOrPut(userId) { OpusCodec(audioConfig) }
         val pcmBytes = decoder.decode(data)
         decodeBuffer.fill(0)
         bytesToShorts(pcmBytes, decodeBuffer)
-        noteDecodedEnergy(userId, decodeBuffer, (pcmBytes.size / 2).coerceAtMost(FRAME_SIZE_SAMPLES))
         decodeBuffer
     } catch (_: Exception) {
         null
@@ -611,6 +626,8 @@ class AudioBridge(
         if (userId in mutedUserIds) return
         if (_isOutputMuted.value) return // Global output mute — discard incoming audio
         recvFrames++
+        // 收到包就判定"这个人在说话"（发送端已按 VAD 门控，不说话不会发流）
+        noteRemotePacket(userId, System.currentTimeMillis())
         // 拷贝一份：native 层若复用同一个 ByteArray，存引用会被后续帧覆盖
         userJitter.getOrPut(userId) {
             JitterBuffer(
