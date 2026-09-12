@@ -102,14 +102,19 @@ class AudioRouteManager(private val context: Context) {
     /**
      * 重新枚举设备。
      *
-     * 只保留 [AudioDeviceInfo.isSink] 的，并排掉 [AudioDeviceInfo.TYPE_TELEPHONY] ——
-     * 它是电话用的虚拟设备，不是真实输出，列出来会让用户选到一个没声音的项。
-     * 不硬编码白名单，这样将来系统新增设备类型也能自动出现。
+     * 只保留 [AudioDeviceInfo.isSink] 的，并排掉两类"能列出来但不能用"的：
+     *  · [AudioDeviceInfo.TYPE_TELEPHONY] —— 电话用的虚拟设备，不是真实输出；
+     *  · [AudioDeviceInfo.TYPE_FM]        —— FM 收音机（拿耳机线当天线），对通话输出无意义。
+     * 用黑名单而不是白名单：将来系统新增设备类型能自动出现，不用改代码。
      */
     fun refresh() {
         val list = try {
             audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                .filter { it.isSink && it.type != AudioDeviceInfo.TYPE_TELEPHONY }
+                .filter {
+                    it.isSink &&
+                        it.type != AudioDeviceInfo.TYPE_TELEPHONY &&
+                        it.type != AudioDeviceInfo.TYPE_FM
+                }
                 .map { AudioRouteDevice(it.id, it.productName?.toString().orEmpty(), it.type) }
                 .distinctBy { it.id }
         } catch (e: Exception) {
@@ -198,19 +203,49 @@ class AudioRouteManager(private val context: Context) {
     }
 
     /**
+     * 找到与指定输出设备对应的**输入**设备。
+     *
+     * 输出设备多半不是输入设备：扬声器、听筒根本没有采集端，把它们设给 AudioRecord
+     * 只会被系统拒绝（日志表现为「采纳=false」）。蓝牙 / 有线 / USB 耳机才是双向的，
+     * 但同一个物理设备在 GET_DEVICES_OUTPUTS 和 GET_DEVICES_INPUTS 里未必是同一个 id，
+     * 所以要在输入列表里单独找：先按 id（双向设备 id 相同），再按 type + 商品名。
+     *
+     * 找不到就返回 null，交回系统默认（内置麦克风）—— 那是正确结果，不是失败。
+     */
+    private fun matchingInputFor(dev: AudioDeviceInfo): AudioDeviceInfo? {
+        return try {
+            val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            // 匹配规则（先 id、再 type + 商品名）与 resolveSavedDevice 完全相同，直接复用 ——
+            // 那边已经有 7 条单测覆盖，这里就不重复实现一份、也不重复测。
+            val wantName = dev.productName?.toString().orEmpty()
+            val match = resolveSavedDevice(
+                dev.id, dev.type, wantName,
+                inputs.map { AudioRouteDevice(it.id, it.productName?.toString().orEmpty(), it.type) },
+            ) ?: return null
+            inputs.firstOrNull { it.id == match.id }
+        } catch (e: Exception) {
+            Log.w(TAG, "枚举输入设备失败", e)
+            null
+        }
+    }
+
+    /**
      * 把偏好应用到录音。
      *
-     * 麦克风跟着输出设备走：选了蓝牙耳机，采集也从耳机麦进。这与 Android 的
-     * CommunicationDevice 语义一致（输入输出成对），用户预期的"切到耳机"就是这个意思。
+     * 麦克风跟着输出设备走：选了蓝牙耳机，采集也从耳机麦进 —— 这与 Android 的
+     * CommunicationDevice 语义一致（输入输出成对），也是用户说"切到耳机"时的预期。
+     * 但只在**该设备确实有采集端**时才设；扬声器/听筒这类单向下行设备交回系统默认。
      */
     fun applyTo(record: AudioRecord?): Boolean {
         val r = record ?: return false
         return try {
-            val dev = currentDevice()
+            val out = currentDevice()
+            val dev = out?.let { matchingInputFor(it) }
             val ok = r.setPreferredDevice(dev)
             Log.i(
                 TAG,
-                "采集路由: 目标=${dev?.let { nameOf(it) } ?: "跟随系统"} 采纳=$ok " +
+                "采集路由: 输出侧=${out?.let { nameOf(it) } ?: "跟随系统"} " +
+                        "采集侧=${dev?.let { nameOf(it) } ?: "系统默认"} 采纳=$ok " +
                         "实际=${r.routedDevice?.let { nameOf(it) }}",
             )
             ok
