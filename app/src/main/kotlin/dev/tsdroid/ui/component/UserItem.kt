@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.sp
 import kotlin.math.absoluteValue
 import dev.tsdroid.han.R
 import dev.tslib.User
+import dev.tsdroid.ui.theme.avatarColorFor
 
 import androidx.compose.foundation.clickable
 import androidx.compose.material3.IconButton
@@ -134,17 +135,6 @@ fun UserItem(
     }
 }
 
-internal val defaultAvatarColors = listOf(
-    Color(0xFF5C6BC0), // indigo
-    Color(0xFF26A69A), // teal
-    Color(0xFFEF5350), // red
-    Color(0xFFAB47BC), // purple
-    Color(0xFF42A5F5), // blue
-    Color(0xFFFF7043), // deep orange
-    Color(0xFF66BB6A), // green
-    Color(0xFFEC407A), // pink
-)
-
 @Composable
 private fun AvatarWithRing(
     avatar: ImageBitmap?,
@@ -182,9 +172,7 @@ private fun AvatarWithRing(
                 contentScale = ContentScale.Crop,
             )
         } else {
-            val bgColor = defaultAvatarColors[
-                nickname.hashCode().absoluteValue % defaultAvatarColors.size
-            ]
+            val bgColor = avatarColorFor(nickname)
             val letter = nickname.firstOrNull()?.uppercase() ?: "?"
             Box(
                 modifier = Modifier

@@ -43,7 +43,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
-import dev.tsdroid.ui.component.defaultAvatarColors
+import dev.tsdroid.ui.theme.avatarColorFor
 import androidx.lifecycle.*
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
@@ -841,9 +841,7 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                             // 没有头像（服务器上这个人就没设头像）：用首字头像兜底，和频道树同一套取色，
                             // 别显示一个跟谁都对不上的通用人形图标
                             val nick = displayNickname ?: "?"
-                            val bgColor = defaultAvatarColors[
-                                nick.hashCode().absoluteValue % defaultAvatarColors.size
-                            ]
+                            val bgColor = avatarColorFor(nick)
                             Box(
                                 modifier = Modifier.fillMaxSize().clip(CircleShape).background(bgColor),
                                 contentAlignment = Alignment.Center,
@@ -967,9 +965,7 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                                             )
                                         } else {
                                             // 首字头像兜底（同频道树取色）
-                                            val bgColor = defaultAvatarColors[
-                                                user.nickname.hashCode().absoluteValue % defaultAvatarColors.size
-                                            ]
+                                            val bgColor = avatarColorFor(user.nickname)
                                             Box(
                                                 modifier = Modifier.fillMaxSize().clip(CircleShape).background(bgColor),
                                                 contentAlignment = Alignment.Center,
