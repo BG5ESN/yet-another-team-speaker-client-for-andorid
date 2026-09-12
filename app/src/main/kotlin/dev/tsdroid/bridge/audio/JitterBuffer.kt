@@ -52,6 +52,20 @@ internal class JitterBuffer(
         const val JB_IDLE_RESET_MS = 250L
     }
 
+    /**
+     * 并发保护。
+     *
+     * submit() 来自 serviceScope（Dispatchers.Main —— audio_received 事件），
+     * produceTick()/adapt() 来自 playbackScope（专用高优先级音频线程）。
+     * 两条线程都会碰 pending(TreeMap) 和各路计数器，而 TreeMap **不是线程安全的** ——
+     * 并发 put 会把红黑树结构改坏，崩在 TreeMap.fixAfterInsertion 里的 NPE 上。
+     * 真机实测崩溃栈：submit → putIfAbsent → TreeMap.put → fixAfterInsertion（偶发）。
+     *
+     * 所有公开入口一律加锁。锁内包含一次 Opus 解码（约 0.5ms），代价可接受：
+     * 正确性优先，音频包晚半毫秒远好过整个进程崩掉。
+     */
+    private val lock = Any()
+
     private val pending = java.util.TreeMap<Int, ByteArray>()
     private var nextExpected = -1
     private var waitTicks = 0
@@ -77,22 +91,24 @@ internal class JitterBuffer(
     /** 最近一次收到包的时刻（诊断用） */
     @Volatile var lastRecvMs = 0L
         private set
-    var dupDropped = 0L
+
+    // 计数器在锁内自增、由 stats 线程在锁外读 → 用 @Volatile 保证可见性
+    @Volatile var dupDropped = 0L
         private set
-    var lostCount = 0L
+    @Volatile var lostCount = 0L
         private set
-    var resyncCount = 0L
+    @Volatile var resyncCount = 0L
         private set
-    var plcCount = 0L
+    @Volatile var plcCount = 0L
         private set
 
-    fun pendingSize(): Int = pending.size
+    fun pendingSize(): Int = synchronized(lock) { pending.size }
 
     /** 诊断用：当前目标深度（时隙） */
-    fun targetSlots(): Int = targetSlots
+    fun targetSlots(): Int = synchronized(lock) { targetSlots }
 
     /** 诊断用：抖动估计（ms） */
-    fun jitterMs(): Double = jitterEwmaMs
+    fun jitterMs(): Double = synchronized(lock) { jitterEwmaMs }
 
     /** 从 nextExpected 起连续可播的帧数 */
     private fun contiguousDepth(): Int {
@@ -106,7 +122,7 @@ internal class JitterBuffer(
     }
 
     /** 收到一帧语音包。@param now 到达时刻（ms），由调用方给 */
-    fun submit(packetId: Int, data: ByteArray, now: Long) {
+    fun submit(packetId: Int, data: ByteArray, now: Long) = synchronized(lock) {
         lastRecvMs = now
         if (arrivalLastMs != 0L && packetId >= 0) {
             val interval = (now - arrivalLastMs).toDouble()
@@ -204,7 +220,7 @@ internal class JitterBuffer(
      * 产出当前 20ms 时隙的 PCM：真实帧 / PLC 帧 / null（静音，让混音去写）。
      * @param now 当前时刻（ms），由调用方给
      */
-    fun produceTick(now: Long): ShortArray? {
+    fun produceTick(now: Long): ShortArray? = synchronized(lock) {
         if (nextExpected < 0) return null
         if (pending.isEmpty() && now - lastRecvMs > JB_IDLE_RESET_MS) {
             reset()
@@ -279,7 +295,7 @@ internal class JitterBuffer(
         return out
     }
 
-    fun reset() {
+    fun reset() = synchronized(lock) {
         pending.clear()
         nextExpected = -1
         waitTicks = 0
