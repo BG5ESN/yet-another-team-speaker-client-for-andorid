@@ -51,6 +51,11 @@ class AudioBridge(
          * 实测不合适直接改这一个数就行。
          */
         private const val FOCUS_RETRY_DELAY_MS = 800L
+        /**
+         * 说完话之后 duck 焦点还保持多久（ms）再释放。
+         * 太短：字与字的间隙会让音乐反复起落；太长：没人说话时音乐还憋着。2.5s 是折中。
+         */
+        private const val AUDIO_DUCK_HOLD_MS = 2500L
         private const val FRAME_SIZE_SAMPLES = SAMPLE_RATE * FRAME_SIZE_MS / 1000 // 960
         private const val FRAME_SIZE_BYTES = FRAME_SIZE_SAMPLES * 2 // 16-bit PCM = 2 bytes/sample
         // AudioTrack 硬件缓冲（上限，不是常驻延迟）：给它足够空间吸收突发
@@ -164,29 +169,34 @@ class AudioBridge(
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var focusRetryToken = 0
 
+    /** 当前是否持有"请求别人压低"的 duck 焦点 */
+    private var duckFocusHeld = false
+    /** duck 焦点保持到什么时候（说话有间歇时别让音乐反复起落） */
+    private var focusReleaseAtMs = 0L
+
     private fun requestAudioFocus() {
         try {
             val attrs = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_GAME)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
-            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            // 请求的是 GAIN_TRANSIENT_MAY_DUCK，**不是** GAIN：
+            //   · AUDIOFOCUS_GAIN               → 对方收到 AUDIOFOCUS_LOSS              → 对方**停止**
+            //   · AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK → 对方收到 LOSS_TRANSIENT_CAN_DUCK → 对方**压低音量继续**
+            // 后者才是"有人说话时音乐变轻"。而且我们只在有人说话时才持焦点
+            // （见 updateDuckFocus），没人说话时完全不持有，音乐保持正常音量。
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
                 .setAudioAttributes(attrs)
                 .setWillPauseWhenDucked(true)
                 .setOnAudioFocusChangeListener { change ->
                     when (change) {
-                        // ⚠️ AUDIOFOCUS_LOSS 是**永久**失去，和 LOSS_TRANSIENT 语义完全不同：
-                        //    系统此后**不会再回调 GAIN**，只把它当"静音一下"就会永远哑着。
-                        //    而放视频/听歌触发的正是它 —— 音乐类 App 请求的是持久焦点
-                        //    AUDIOFOCUS_GAIN，两个 GAIN 相撞、后到的赢，我们先被踢出局。
-                        //    （实测：通话中放音乐 → TS3 被静音且再也不恢复。）
-                        AudioManager.AUDIOFOCUS_LOSS -> {
-                            _isOutputMuted.value = true
-                            retryAudioFocus()
-                        }
-                        // 暂时失去（来电、闹钟等）：静音等着，系统稍后会回调 GAIN
+                        // 被别人永久抢走：**不要静音**。我们想要的只是让别人压低，不是被别人静音 ——
+                        // 重抢一次就行（对方收到 CAN_DUCK 会让路）。
+                        // 旧实现在这里 _isOutputMuted = true，那正是"音乐一响 TS3 就哑"的来源。
+                        AudioManager.AUDIOFOCUS_LOSS -> retryAudioFocus()
+                        // 暂时让路（导航播报、来电）：这时候必须静音，系统稍后会回调 GAIN
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> _isOutputMuted.value = true
-                        // 拿回焦点 / 对方只是要求我们 duck（压低音量即可，照常出声）
+                        // 拿回焦点 / 对方只是要求我们 duck：照常出声
                         AudioManager.AUDIOFOCUS_GAIN,
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> _isOutputMuted.value = false
                     }
@@ -202,12 +212,9 @@ class AudioBridge(
     /**
      * 把音频焦点抢回来。
      *
-     * 为什么必须有它：AUDIOFOCUS_LOSS 之后系统不会再还焦点，而"通话中放音乐/视频"必然触发它。
-     * 延迟一小会儿再抢 —— 给对方一个收到 LOSS 并暂停的机会（音乐类 App 一般会暂停），
-     * 也避免同一瞬间反复互抢。
-     *
-     * 抢回来之后我们恢复出声，而音乐那边收到 LOSS 会自己停 —— 这正好就是
-     * "通话中语音优先"想要的效果（不需要改 USAGE 去跟系统要 ducking）。
+     * AUDIOFOCUS_LOSS 是**永久**失去，系统此后不会再还焦点，必须自己重抢。
+     * 延迟一小会儿再抢：给对方一个收到 LOSS 并让路的机会，也避免同一瞬间反复互抢。
+     * 这里**不碰 _isOutputMuted** —— 我们只是要别人压低，不是要被别人静音。
      */
     private fun retryAudioFocus() {
         val token = ++focusRetryToken
@@ -215,15 +222,35 @@ class AudioBridge(
             if (token != focusRetryToken) return@postDelayed   // 期间又来了新的 LOSS，交给新那次处理
             val req = audioFocusRequest ?: return@postDelayed
             try {
-                val result = audioManager.requestAudioFocus(req)
-                Log.i(TAG, "音频焦点重抢 result=$result")
-                if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                    _isOutputMuted.value = false
-                }
+                Log.i(TAG, "音频焦点重抢 result=" + audioManager.requestAudioFocus(req))
             } catch (e: Exception) {
                 Log.w(TAG, "音频焦点重抢失败", e)
             }
         }, FOCUS_RETRY_DELAY_MS)
+    }
+
+    /**
+     * 按"远端有没有人在说话"动态开关 duck 焦点 —— 这是"有人说话时音乐变轻"的实现。
+     *
+     * 为什么用动态开关而不是通话全程持有：开车时没人说话的那些时段，音乐该是正常音量。
+     * 释放带迟滞（[AUDIO_DUCK_HOLD_MS]），否则说话时字与字的间隙会让音乐反复起落。
+     *
+     * 注意只看**远端**（speaking 集合来自收到的语音包）：自己说话时不压低 ——
+     * 自己在说话本来也听不到音乐，没必要把音乐按下去。
+     */
+    private fun updateDuckFocus(hasRemoteSpeaker: Boolean, now: Long) {
+        if (hasRemoteSpeaker) {
+            focusReleaseAtMs = now + AUDIO_DUCK_HOLD_MS
+            if (!duckFocusHeld) {
+                duckFocusHeld = true
+                Log.i(TAG, "有人说话 → 请求 duck 焦点（音乐压低）")
+                requestAudioFocus()
+            }
+        } else if (duckFocusHeld && now >= focusReleaseAtMs) {
+            duckFocusHeld = false
+            Log.i(TAG, "说话结束 ${AUDIO_DUCK_HOLD_MS}ms → 释放焦点（音乐恢复）")
+            abandonAudioFocus()
+        }
     }
 
     private fun abandonAudioFocus() {
@@ -236,6 +263,8 @@ class AudioBridge(
 
     fun initialize() {
         Log.i(TAG, "initialize(): 旧轨道=${audioTrack?.hashCode()} 本实例已建轨道数=$trackCreates")
+        // 重连会再调一次 initialize：焦点状态跟着重新开始，别把上一轮的 held 带过来
+        duckFocusHeld = false
         try {
             // Explicitly release any old audio stream resources if lingering
             audioTrack?.stop()
@@ -244,7 +273,8 @@ class AudioBridge(
 
             encoder = OpusCodec(audioConfig)
             startAudioStats()
-            requestAudioFocus()
+            // 注意：这里**不再**无条件请求焦点。焦点改由 updateDuckFocus() 按"有没有人在说话"
+            // 动态开关 —— 通话期间一直独占焦点会全程压着音乐，不是我们要的。
             initAudioTrack()
             startPlaybackLoop()
             Log.i(TAG, "initialize() 完成: track=${audioTrack?.hashCode()} state=${audioTrack?.state} " +
@@ -598,6 +628,9 @@ class AudioBridge(
             Log.i(TAG, "说话圈: 在说=$speaking 最响=$loudest 门限=${ringThresholdDb.toInt()}dBFS")
         }
         if (_loudestSpeakerId.value != loudest) _loudestSpeakerId.value = loudest
+
+        // 动态开关音频焦点：有人在说话 → 让音乐压低；都安静了一会儿 → 放开让音乐恢复
+        updateDuckFocus(speaking.isNotEmpty(), now)
     }
 
     /** 应用增益并写入 AudioTrack（阻塞写，天然限速到实时） */
@@ -720,6 +753,7 @@ class AudioBridge(
         // 取消待执行的焦点重抢，并让已排队的那次失效（否则释放后还会去抢）
         focusRetryToken++
         mainHandler.removeCallbacksAndMessages(null)
+        duckFocusHeld = false
         abandonAudioFocus()
         statsJob?.cancel()
         statsJob = null
