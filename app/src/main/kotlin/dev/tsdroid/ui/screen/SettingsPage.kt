@@ -359,6 +359,7 @@ private fun MicTestSection(ringDb: Float) {
     var holding by remember { mutableStateOf(false) }
     var levelDb by remember { mutableStateOf(-120.0) }
     var speaking by remember { mutableStateOf(false) }
+    var peakShownDb by remember { mutableStateOf(-120.0) }
     var lastAboveMs by remember { mutableStateOf(0L) }
     // 采集循环里要读最新的门限值 —— 拖滑块改门限时不能重启采集
     val currentRingDb by rememberUpdatedState(ringDb)
@@ -367,6 +368,7 @@ private fun MicTestSection(ringDb: Float) {
         if (!holding) {
             levelDb = -120.0
             speaking = false
+            peakShownDb = -120.0
             lastAboveMs = 0L
             return@LaunchedEffect
         }
@@ -407,6 +409,10 @@ private fun MicTestSection(ringDb: Float) {
             withContext(Dispatchers.IO) {
                 val buf = ShortArray(FRAME_SAMPLES)
                 var tick = 0
+                // 峰值标记的内部状态（不进 Compose 状态，避免每帧重组）
+                var peakDb = -120.0
+                var peakHoldUntilMs = 0L
+                var lastPeakStepMs = 0L
                 while (isActive) {
                     val read = try {
                         record.read(buf, 0, FRAME_SAMPLES)
@@ -419,10 +425,20 @@ private fun MicTestSection(ringDb: Float) {
                         if (db > currentRingDb) lastAboveMs = nowMs
                         // 与生产门控**同一条规则**：超门限后保持 VOICE_HANGOVER_MS 才算"在说话"
                         val active = nowMs - lastAboveMs <= VOICE_HANGOVER_MS
+                        // 峰值保持：一出现更高值就刷新保持窗口；窗口过后按固定速率回落（不跳变）
+                        if (db >= peakDb) {
+                            peakDb = db
+                            peakHoldUntilMs = nowMs + PEAK_HOLD_MS
+                        } else if (nowMs >= peakHoldUntilMs) {
+                            val dtSec = (nowMs - lastPeakStepMs).coerceAtLeast(0L) / 1000.0
+                            peakDb = maxOf(db, peakDb - PEAK_DECAY_DB_PER_SEC * dtSec)
+                        }
+                        lastPeakStepMs = nowMs
                         // 25Hz 刷 UI（每 2 帧一次），别 50Hz 刷 Compose
                         if (tick++ % 2 == 0) {
                             levelDb = db
                             speaking = active
+                            peakShownDb = peakDb
                         }
                     }
                 }
@@ -432,6 +448,7 @@ private fun MicTestSection(ringDb: Float) {
             record.release()
             levelDb = -120.0
             speaking = false
+            peakShownDb = -120.0
         }
     }
 
@@ -439,6 +456,7 @@ private fun MicTestSection(ringDb: Float) {
 
     // ① 电平条放**上面**：按住下面的按钮时，手指挡不到读数
     val levelFrac = ((levelDb + 60.0) / 45.0).coerceIn(0.0, 1.0).toFloat()
+    val peakFrac = ((peakShownDb + 60.0) / 45.0).coerceIn(0.0, 1.0).toFloat()
     val thresholdFrac = ((ringDb + 60f) / 45f).coerceIn(0f, 1f)
     val trackColor = MaterialTheme.colorScheme.surfaceVariant
     val onColor = Color(0xFF4CAF50)
@@ -449,24 +467,33 @@ private fun MicTestSection(ringDb: Float) {
         Canvas(
             modifier = Modifier
                 .weight(1f)
-                .height(12.dp)
+                .height(18.dp)      // 比条本身高：给峰值游标留出上下探头的余地（Canvas 会裁剪自己）
         ) {
-            val h = size.height
-            drawRoundRect(color = trackColor, cornerRadius = CornerRadius(h / 2))
+            val barH = 12.dp.toPx()
+            val top = (size.height - barH) / 2f
+            val r = CornerRadius(barH / 2)
+            drawRoundRect(color = trackColor, topLeft = Offset(0f, top), size = Size(size.width, barH), cornerRadius = r)
             if (levelFrac > 0f) {
                 drawRoundRect(
                     color = if (speaking) onColor else idleColor,
-                    size = Size(size.width * levelFrac, h),
-                    cornerRadius = CornerRadius(h / 2),
+                    topLeft = Offset(0f, top),
+                    size = Size(size.width * levelFrac, barH),
+                    cornerRadius = r,
                 )
             }
-            // 门限刻度线
-            val x = size.width * thresholdFrac
-            drawRect(
-                color = markColor,
-                topLeft = Offset(x.coerceIn(0f, size.width - 2f), 0f),
-                size = Size(2.dp.toPx(), h),
-            )
+            // 门限刻度线（贯穿整个画布高度）
+            val tx = (size.width * thresholdFrac).coerceIn(0f, size.width - 2f)
+            drawRect(color = markColor, topLeft = Offset(tx, 0f), size = Size(2.dp.toPx(), size.height))
+            // 峰值游标：贯穿全高，比门限线粗一点，压在门限线上面更好认；
+            // 绿 = 峰值够得着门限（这把音量发得出去），橙 = 够不着（会被当静音吞掉）
+            if (peakFrac > 0f) {
+                val w = 3.dp.toPx()
+                drawRect(
+                    color = if (peakShownDb >= ringDb) onColor else Color(0xFFFF9800),
+                    topLeft = Offset((size.width * peakFrac - w / 2).coerceIn(0f, size.width - w), 0f),
+                    size = Size(w, size.height),
+                )
+            }
         }
         Spacer(Modifier.width(10.dp))
         Text(
@@ -477,7 +504,7 @@ private fun MicTestSection(ringDb: Float) {
         )
     }
     Text(
-        text = "${levelDb.toInt()} dBFS",
+        text = "当前 ${levelDb.toInt()} dBFS   峰值 ${peakShownDb.toInt()} dBFS",
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -512,5 +539,9 @@ private fun MicTestSection(ringDb: Float) {
     }
 }
 
+/** 峰值标记停住不动的时间。取与门控保持时间同值(VOICE_HANGOVER_MS)，纯为视觉一致。 */
+private const val PEAK_HOLD_MS = 250L
+/** 保持时间过后，峰值标记每秒回落多少 dB（30 → 从满量程落到 -60 约 1.5s，看得见但不拖沓）。 */
+private const val PEAK_DECAY_DB_PER_SEC = 30.0
 private const val SAMPLE_RATE = 48000
 private const val FRAME_SAMPLES = 960
