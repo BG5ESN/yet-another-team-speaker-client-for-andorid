@@ -90,10 +90,10 @@ import dev.tslib.User
 import dev.tsdroid.ui.component.ChannelTree
 import dev.tsdroid.ui.component.ChatView
 import dev.tsdroid.ui.component.FileManagerDialog
-import dev.tsdroid.ui.component.ShareTarget
-import dev.tsdroid.viewmodel.ChatMessage
-import dev.tsdroid.viewmodel.DownloadState
-import dev.tsdroid.viewmodel.FileAttachment
+import dev.tsdroid.model.ShareTarget
+import dev.tsdroid.model.ChatMessage
+import dev.tsdroid.model.DownloadState
+import dev.tsdroid.model.FileAttachment
 import dev.tsdroid.viewmodel.ServerViewModel
 import kotlinx.coroutines.flow.StateFlow
 

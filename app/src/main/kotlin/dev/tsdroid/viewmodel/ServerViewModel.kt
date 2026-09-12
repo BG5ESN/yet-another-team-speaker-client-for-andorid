@@ -22,7 +22,12 @@ import dev.tsdroid.bridge.AudioBridge
 import dev.tsdroid.bridge.FileCache
 import dev.tsdroid.bridge.IconCache
 import dev.tsdroid.bridge.TsClient
-import dev.tsdroid.bridge.TsFileEntry
+import dev.tsdroid.model.ChatMessage
+import dev.tsdroid.model.DownloadState
+import dev.tsdroid.model.FileAttachment
+import dev.tsdroid.model.MessageParser
+import dev.tsdroid.model.ParsedMessage
+import dev.tsdroid.model.TsFileEntry
 import dev.tsdroid.han.R
 import dev.tsdroid.data.BookmarkStore
 import dev.tsdroid.data.MessageStore
@@ -45,31 +50,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-data class FileAttachment(
-    val fileName: String,
-    val fileSize: Long,
-    val fileId: String,
-    val isImage: Boolean,
-    val channelId: Long = 0L,
-)
-
-data class ChatMessage(
-    val sender: String,
-    val text: String,
-    val timestamp: Long = System.currentTimeMillis(),
-    val isMe: Boolean = false,
-    val isPrivate: Boolean = false,
-    val senderId: Int = 0,
-    val fileAttachment: FileAttachment? = null,
-)
-
-sealed class DownloadState {
-    data object Idle : DownloadState()
-    data object Downloading : DownloadState()
-    data class Done(val image: ImageBitmap?, val fileUri: android.net.Uri? = null) : DownloadState()
-    data class Error(val message: String) : DownloadState()
-}
 
 class ServerViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
@@ -410,167 +390,51 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
                 // talk_status_start / talk_status_stop 不再用于圈：
                 // 该事件是一次性的（连接瞬间爆发一次就没了），且判据是"收到语音包"不是"有声音"。
                 // 现在由 AudioBridge.speakingUserIds（解码 PCM 能量）统一驱动。
-                "text_message" -> {
-                    try {
-                        // Safely extract message data with null checks
-                        val target = event.data["target"] as? String
-                        val sender = event.data["sender_name"] as? String
-                        val senderId = (event.data["sender_id"] as? Number)?.toInt()
-                        val text = event.data["message"] as? String
-
-                        // Skip invalid messages early
-                        if (target == null || sender == null || text == null) {
-                            Log.w(TAG, "Invalid text_message: missing required fields")
-                            return
-                        }
-
-                        // Skip system error messages and abuse protection messages
-                        if (text.contains("滥用保护") || 
-                            text.contains("abuse protection") ||
-                            text.contains("flood protection") ||
-                            text.contains("spam protection") ||
-                            text.contains("Cannot perform this action due to") ||
-                            text.contains("无法采取此动作") ||
-                            text.contains("Action currently not possible")) {
-                            Log.i(TAG, "Skipping system abuse protection message: $text")
-                            return
-                        }
-
-                        // Log safely with truncation to avoid huge strings
-                        val safeText = if (text.length > 200) text.take(200) + "..." else text
-                        Log.d(TAG, "Text message: target=$target sender=$sender text=$safeText")
-
-                        // Skip our own messages — we already added them locally
-                        val myId = tsClient?.clientId
-                        if (myId != null && senderId == myId) return
-
-                        // Safely parse file attachment with extra protection
-                        val attachment = try {
-                            if (text.length > 10000) {
-                                Log.w(TAG, "Message too long, skipping file attachment parsing")
-                                null
-                            } else {
-                                parseFileAttachment(text)
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error parsing file attachment", e)
-                            null
-                        }
-
-                        // Use original text if attachment parsing fails, display safely
-                        val displayText = if (attachment != null) {
-                            attachment.fileName
-                        } else {
-                            // Sanitize text to avoid display issues
-                            text.replace("\u0000", "").trim()
-                        }
-
-                        // Safely process based on message target
-                        try {
-                            when (target) {
-                                "private" -> {
-                                    val id = senderId ?: run {
-                                        Log.w(TAG, "Private message without sender ID")
-                                        return
-                                    }
-                                    
-                                    // Safely create and add message
-                                    val msg = ChatMessage(
-                                        sender = sender, 
-                                        text = displayText, 
-                                        isPrivate = true, 
-                                        senderId = id, 
-                                        fileAttachment = attachment
-                                    )
-                                    
-                                    val current = _privateMessages.value.toMutableMap()
-                                    val existingMessages = current[id] ?: emptyList()
-                                    current[id] = existingMessages + msg
-                                    _privateMessages.value = current
-                                    
-                                    scheduleSave()
-                                    
-                                    // Only increment if chat is closed or not on this user's PM
-                                    if (!isChatOpen || activeChatTab != 1 || activePmUserId != id) {
-                                        val unread = _unreadPrivate.value.toMutableMap()
-                                        val currentUnread = unread[id] ?: 0
-                                        unread[id] = currentUnread + 1
-                                        _unreadPrivate.value = unread
-                                    }
-                                }
-                                "channel" -> {
-                                    // Safely create and add channel message
-                                    val msg = ChatMessage(
-                                        sender = sender, 
-                                        text = displayText, 
-                                        fileAttachment = attachment
-                                    )
-                                    
-                                    val currentChannelMessages = _channelMessages.value
-                                    _channelMessages.value = currentChannelMessages + msg
-                                    
-                                    scheduleSave()
-                                    
-                                    // Only increment if chat is closed or not on channel tab
-                                    if (!isChatOpen || activeChatTab != 0) {
-                                        val currentUnread = _unreadChannel.value
-                                        _unreadChannel.value = currentUnread + 1
-                                    }
-                                }
-                                else -> {
-                                    Log.w(TAG, "Unknown message target: $target")
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error adding message to UI", e)
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error processing text_message event", e)
-                    }
-                }
+                // 消息本身交给 MessageParser（纯逻辑、可单测），这里只负责把结果落进状态。
+                "text_message" -> applyParsedMessage(
+                    MessageParser.parse(event, tsClient?.clientId) { Log.d(TAG, it) },
+                )
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in handleEvent", e)
         }
     }
 
-    private fun parseFileAttachment(text: String): FileAttachment? {
-        // TS5 MyTeamSpeak JSON format
-        if (text.startsWith("{\"msg_type\":")) {
-            return try {
-                val json = org.json.JSONObject(text)
-                if (json.optString("msg_type") != "ts.file.myts") return null
-                val fileName = json.optString("file_name", "")
-                val fileSize = json.optLong("file_size", 0)
-                val fileId = json.optString("file_id", "")
-                if (fileName.isEmpty() || fileId.isEmpty()) return null
-                val ext = fileName.substringAfterLast('.', "").lowercase()
-                val isImage = ext in setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
-                FileAttachment(fileName, fileSize, fileId, isImage)
-            } catch (_: Exception) { null }
+    /**
+     * 把归约出来的消息落进状态。副作用只在这一层：
+     * 追加到对应列表 → 落盘 → 未读计数（正开着对应 tab 时不加未读）。
+     */
+    private fun applyParsedMessage(parsed: ParsedMessage?) {
+        when (parsed) {
+            null -> Unit
+            is ParsedMessage.Channel -> {
+                _channelMessages.value = _channelMessages.value + parsed.message
+                scheduleSave()
+                // Only increment if chat is closed or not on channel tab
+                if (!isChatOpen || activeChatTab != 0) {
+                    _unreadChannel.value = _unreadChannel.value + 1
+                }
+            }
+            is ParsedMessage.Private -> {
+                val id = parsed.userId
+                val current = _privateMessages.value.toMutableMap()
+                current[id] = (current[id] ?: emptyList()) + parsed.message
+                _privateMessages.value = current
+                scheduleSave()
+                // Only increment if chat is closed or not on this user's PM
+                if (!isChatOpen || activeChatTab != 1 || activePmUserId != id) {
+                    val unread = _unreadPrivate.value.toMutableMap()
+                    unread[id] = (unread[id] ?: 0) + 1
+                    _unreadPrivate.value = unread
+                }
+            }
         }
-        // TS3 file transfer URL format: ts3file://host?port=...&channel=...&filename=...&size=...
-        val ts3Start = text.indexOf("ts3file://")
-        if (ts3Start >= 0) {
-            return try {
-                // Extract the ts3file:// URL (until whitespace or end of string)
-                val urlStr = text.substring(ts3Start).takeWhile { !it.isWhitespace() }
-                val uri = android.net.Uri.parse(urlStr)
-                val fileName = uri.getQueryParameter("filename") ?: return null
-                val fileSize = uri.getQueryParameter("size")?.toLongOrNull() ?: 0L
-                val channelId = uri.getQueryParameter("channel")?.toLongOrNull() ?: 0L
-                val ext = fileName.substringAfterLast('.', "").lowercase()
-                val isImage = ext in setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
-                FileAttachment(fileName, fileSize, fileId = "", isImage, channelId = channelId)
-            } catch (_: Exception) { null }
-        }
-        return null
     }
 
     /** Re-parse old saved messages that contain ts3file:// but have no fileAttachment. */
     private fun migrateMessage(msg: ChatMessage): ChatMessage {
         if (msg.fileAttachment != null) return msg
-        val attachment = parseFileAttachment(msg.text) ?: return msg
+        val attachment = MessageParser.parseFileAttachment(msg.text) ?: return msg
         return msg.copy(text = attachment.fileName, fileAttachment = attachment)
     }
 

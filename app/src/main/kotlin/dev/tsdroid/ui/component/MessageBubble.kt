@@ -34,7 +34,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
-import dev.tsdroid.viewmodel.DownloadState
+import dev.tsdroid.model.DownloadState
 import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,8 +56,8 @@ import androidx.compose.ui.unit.dp
 import dev.tsdroid.han.R
 import coil.compose.AsyncImage
 import dev.tslib.BBCode
-import dev.tsdroid.viewmodel.ChatMessage
-import dev.tsdroid.viewmodel.FileAttachment
+import dev.tsdroid.model.ChatMessage
+import dev.tsdroid.model.FileAttachment
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale

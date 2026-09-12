@@ -16,9 +16,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import dev.tsdroid.viewmodel.ChatMessage
-import dev.tsdroid.viewmodel.DownloadState
-import dev.tsdroid.viewmodel.FileAttachment
+import dev.tsdroid.model.ChatMessage
+import dev.tsdroid.model.DownloadState
+import dev.tsdroid.model.FileAttachment
 import kotlinx.coroutines.flow.StateFlow
 
 private const val INITIAL_PAGE = 15

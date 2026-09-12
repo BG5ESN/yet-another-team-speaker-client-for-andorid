@@ -57,17 +57,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.tsdroid.han.R
-import dev.tsdroid.bridge.TsFileEntry
+import dev.tsdroid.model.ShareTarget
+import dev.tsdroid.model.TsFileEntry
 import dev.tslib.Channel
 import dev.tslib.User
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-
-sealed class ShareTarget {
-    data object Channel : ShareTarget()
-    data class PrivateMessage(val userId: Int, val nickname: String) : ShareTarget()
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

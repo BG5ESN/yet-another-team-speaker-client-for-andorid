@@ -2,8 +2,8 @@ package dev.tsdroid.data
 
 import android.content.Context
 import android.util.Log
-import dev.tsdroid.viewmodel.ChatMessage
-import dev.tsdroid.viewmodel.FileAttachment
+import dev.tsdroid.model.ChatMessage
+import dev.tsdroid.model.FileAttachment
 import java.io.File
 
 class MessageStore(private val context: Context) {

@@ -25,19 +25,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
+import dev.tsdroid.model.TsFileEntry
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-
-data class TsFileEntry(
-    val name: String,
-    val size: Long,
-    val datetime: Long,
-    val isFile: Boolean,
-)
 
 class TsClient {
 
