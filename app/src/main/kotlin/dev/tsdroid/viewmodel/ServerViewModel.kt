@@ -503,6 +503,17 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         tsClient?.moveToChannel(channelId)
     }
 
+    /**
+     * 拖动增益滑块期间只改内存值（立即生效、**不落盘**）。
+     *
+     * 拖一次滑块会触发几十次 onValueChange，每次都写 DataStore 是纯浪费 IO；
+     * 松手时才走 [setAudioGain] 落盘。UI 在拖动期间用本地值显示，避免和
+     * DataStore 里的旧值来回打架。
+     */
+    fun setAudioGainLive(gain: Float) {
+        audioBridge?.gainFactor = gain
+    }
+
     fun setAudioGain(gain: Float) {
         audioBridge?.gainFactor = gain
         viewModelScope.launch { settingsStore.setAudioGain(gain) }

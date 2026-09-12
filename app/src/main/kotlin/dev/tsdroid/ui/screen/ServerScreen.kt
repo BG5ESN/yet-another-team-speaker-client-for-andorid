@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Speaker
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
@@ -130,6 +131,10 @@ fun ServerScreen(
     val unreadChannel by viewModel.unreadChannel.collectAsStateWithLifecycle()
     val unreadPrivate by viewModel.unreadPrivate.collectAsStateWithLifecycle()
     val audioGain by viewModel.audioGain.collectAsStateWithLifecycle()
+    var volumeMenuOpen by remember { mutableStateOf(false) }
+    // 拖动期间用本地值显示（避免和 DataStore 的旧值来回打架），松手才落盘
+    var dragGain by remember { mutableStateOf<Float?>(null) }
+    val shownGain = dragGain ?: audioGain
     val showLinkThumbnails by viewModel.showLinkThumbnails.collectAsStateWithLifecycle()
     val autoLoadImages by viewModel.autoLoadImages.collectAsStateWithLifecycle()
     val enableFloatingWindow by viewModel.enableFloatingWindow.collectAsStateWithLifecycle()
@@ -473,6 +478,47 @@ fun ServerScreen(
                             tint = if (isOutputMuted) MaterialTheme.colorScheme.error
                             else MaterialTheme.colorScheme.primary,
                         )
+                    }
+
+                    // 音量增益：通话中直接调。点开是滑块，拖动立即生效，松手才落盘。
+                    // 和设置页那把滑块共用同一个范围与刻度（1.0~8.0x，steps=13），
+                    // 两处改动必须一起改，否则会出现两套刻度。
+                    Box {
+                        IconButton(onClick = { volumeMenuOpen = true }) {
+                            Icon(
+                                Icons.Default.VolumeUp,
+                                contentDescription = stringResource(R.string.audio_gain),
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = volumeMenuOpen,
+                            onDismissRequest = { volumeMenuOpen = false },
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .width(240.dp)
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                            ) {
+                                Text(
+                                    text = "${stringResource(R.string.audio_gain)} : " +
+                                            stringResource(R.string.audio_gain_value, shownGain),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                Slider(
+                                    value = shownGain,
+                                    onValueChange = {
+                                        dragGain = it
+                                        viewModel.setAudioGainLive(it)
+                                    },
+                                    onValueChangeFinished = {
+                                        dragGain?.let { g -> viewModel.setAudioGain(g) }
+                                        dragGain = null
+                                    },
+                                    valueRange = 1.0f..8.0f,
+                                    steps = 13,
+                                )
+                            }
+                        }
                     }
                 }
             }
