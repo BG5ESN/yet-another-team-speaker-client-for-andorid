@@ -130,6 +130,10 @@ tsClient: TsClient,
             Surface(
                 modifier = Modifier
                     .size(40.dp) // Make smaller
+                    // clip 必须放在 clickable **之前**：clickable 的涟漪形状取自它自己的 shape
+                    // （默认矩形），看不到 Surface 的 CircleShape，于是按下时圆形边框外会露出
+                    // 一个 40dp 的方框。先裁成圆，涟漪就落在圆内了。
+                    .clip(CircleShape)
                     .pointerInput(Unit) {
                         detectDragGestures { change, dragAmount ->
                             change.consume()
