@@ -170,6 +170,38 @@ class AudioBridge(
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var focusRetryToken = 0
 
+    /**
+     * 通话独占声音。
+     *
+     *  · true（默认）—— 请求 AUDIOFOCUS_GAIN，音乐类 App 收到 AUDIOFOCUS_LOSS 会暂停；
+     *  · false        —— 完全不请求焦点。我们的 AudioTrack 照常出声，音乐也继续放，两者并存。
+     *
+     * 什么时候该关：音乐和通话输出到**不同设备**时（例如音乐走蓝牙、通话音走扬声器），
+     * 物理上本来不冲突，互斥是焦点机制强加的，不是物理必然。
+     *
+     * ⚠️ 这里**不做自动判断**：Android 没有查询别的 App 音频路由的 API —— 我们只能知道
+     * 自己输出到哪、音乐有没有在放（isMusicActive），不知道音乐从哪出。猜错就是用户听不到对方。
+     * 所以交给用户按场景切。
+     *
+     * ⚠️ 并存时两边共用媒体音量（我们的音频走 USAGE_GAME，属媒体流），音量键会同时影响
+     * 通话和音乐，做不到"音乐调小、通话保持"。
+     */
+    @Volatile
+    var exclusiveAudio: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            Log.i(TAG, "通话独占声音 -> $value")
+            if (value) {
+                requestAudioFocus()
+            } else {
+                // 先让在途的重抢失效，再放掉焦点 —— 顺序反了会在放掉之后又被抢回来
+                focusRetryToken++
+                mainHandler.removeCallbacksAndMessages(null)
+                abandonAudioFocus()
+            }
+        }
+
     private fun requestAudioFocus() {
         try {
             val attrs = AudioAttributes.Builder()
@@ -216,6 +248,8 @@ class AudioBridge(
      * "通话中语音优先"想要的效果（不需要改 USAGE 去跟系统要 ducking）。
      */
     private fun retryAudioFocus() {
+        // 并存模式下不再抢焦点（开关切 false 时可能还有在途的重抢排队）
+        if (!exclusiveAudio) return
         val token = ++focusRetryToken
         mainHandler.postDelayed({
             if (token != focusRetryToken) return@postDelayed   // 期间又来了新的 LOSS，交给新那次处理
@@ -250,7 +284,9 @@ class AudioBridge(
 
             encoder = OpusCodec(audioConfig)
             startAudioStats()
-            requestAudioFocus()
+            // 独占模式下才抢焦点；并存模式（exclusiveAudio=false）完全不碰焦点，
+            // 让音乐继续放，我们的音频靠普通混音出声
+            if (exclusiveAudio) requestAudioFocus()
             // 先启动设备监听：refresh() 会填好设备列表，initAudioTrack() 才能立刻应用偏好
             audioRoute.start()
             initAudioTrack()

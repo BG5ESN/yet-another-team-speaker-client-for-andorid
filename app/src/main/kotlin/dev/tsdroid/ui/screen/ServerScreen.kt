@@ -118,6 +118,7 @@ fun ServerScreen(
     val channelIcons by viewModel.channelIcons.collectAsStateWithLifecycle()
     val routeDevices by viewModel.routeDevices.collectAsStateWithLifecycle()
     val routeSelectedId by viewModel.routeSelectedId.collectAsStateWithLifecycle()
+    val exclusiveAudio by viewModel.exclusiveAudio.collectAsStateWithLifecycle()
     var routeMenuOpen by remember { mutableStateOf(false) }
     val userAvatars by viewModel.avatars.collectAsStateWithLifecycle()
     val serverInfo by viewModel.serverInfo.collectAsStateWithLifecycle()
@@ -330,6 +331,18 @@ fun ServerScreen(
                                     )
                                 }
                             }
+                            // 独占开关和"声音从哪出"是同一件事的两面（源不同就不必互斥），
+                            // 所以放在同一个菜单里，通话中一起切最顺手。
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.route_exclusive_audio)) },
+                                onClick = {
+                                    viewModel.setExclusiveAudio(!exclusiveAudio)
+                                    routeMenuOpen = false
+                                },
+                                trailingIcon = {
+                                    if (exclusiveAudio) Icon(Icons.Default.Check, contentDescription = null)
+                                },
+                            )
                         }
                     }
                     IconButton(onClick = { viewModel.disconnect() }) {

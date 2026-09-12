@@ -138,6 +138,10 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
     private val _unreadPrivate = MutableStateFlow<Map<Int, Int>>(emptyMap())
     val unreadPrivate: StateFlow<Map<Int, Int>> = _unreadPrivate.asStateFlow()
 
+    /** 通话是否独占声音（false = 和音乐并存）*/
+    val exclusiveAudio: StateFlow<Boolean> = settingsStore.exclusiveAudio
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
     val audioGain: StateFlow<Float> = settingsStore.audioGain
         .stateIn(viewModelScope, SharingStarted.Eagerly, 1.0f)
 
@@ -243,6 +247,9 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
             audioBridge?.gateTransmissionByVoiceActivity = !_isPttMode.value
             // 恢复上次选的输出设备（设备已不在时 AudioRouteManager 会自动回退跟随系统）
             restoreRouteDevice()
+            // initialize() 在 service 里比这里先跑，已经把焦点抢了 —— 这里同步开关，
+            // 若存的是"并存"，setter 会顺带把手里的焦点放掉
+            audioBridge?.exclusiveAudio = settingsStore.exclusiveAudio.first()
             connectionService = service
             queriedPermChannels.clear()
 
@@ -528,6 +535,15 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleOutputMute() {
         audioBridge?.toggleOutputMute()
+    }
+
+    /**
+     * 通话独占声音开关。
+     * 开：抢焦点，音乐被暂停（原有行为）；关：不抢，两者并存。
+     */
+    fun setExclusiveAudio(enabled: Boolean) {
+        audioBridge?.exclusiveAudio = enabled
+        viewModelScope.launch { settingsStore.setExclusiveAudio(enabled) }
     }
 
     /**

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -20,6 +21,7 @@ private val KEY_ENABLE_FLOATING_WINDOW = booleanPreferencesKey("enable_floating_
 private val KEY_NOISE_SUPPRESSION = booleanPreferencesKey("noise_suppression")
 private val KEY_RING_THRESHOLD_DB = floatPreferencesKey("ring_threshold_db")
 // 输出设备路由：跟随系统存 -1；否则存 id + type + 名字（id 会在蓝牙重连后变，名字是兜底）
+private val KEY_EXCLUSIVE_AUDIO = booleanPreferencesKey("exclusive_audio")
 private val KEY_ROUTE_DEVICE_ID = intPreferencesKey("route_device_id")
 private val KEY_ROUTE_DEVICE_TYPE = intPreferencesKey("route_device_type")
 private val KEY_ROUTE_DEVICE_NAME = stringPreferencesKey("route_device_name")
@@ -88,6 +90,20 @@ class SettingsStore(private val context: Context) {
 
     val routeDeviceName: Flow<String> = context.settingsDataStore.data
         .map { it[KEY_ROUTE_DEVICE_NAME] ?: "" }
+
+    /**
+     * 通话独占声音：true = 抢音频焦点（音乐类 App 收到 LOSS 会暂停）；
+     * false = 完全不抢，我们的语音和音乐同时出声。
+     *
+     * 默认 true（即原有行为）。用户手动切 —— 因为 Android 不提供查询别的 App
+     * 音频路由的 API，"源是否相同"测不出来，只能由用户按场景决定。
+     */
+    val exclusiveAudio: Flow<Boolean> = context.settingsDataStore.data
+        .map { it[KEY_EXCLUSIVE_AUDIO] ?: true }
+
+    suspend fun setExclusiveAudio(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_EXCLUSIVE_AUDIO] = enabled }
+    }
 
     suspend fun setRouteDevice(id: Int, type: Int, name: String) {
         context.settingsDataStore.edit {

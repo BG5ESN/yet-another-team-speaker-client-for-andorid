@@ -150,5 +150,6 @@
     <string name="route_type_aux">Ligne AUX</string>
     <string name="route_type_hdmi">HDMI</string>
     <string name="route_type_dock">Station d\'accueil</string>
+    <string name="route_exclusive_audio">Audio d\'appel exclusif</string>
     <string name="route_type_other">Autre périphérique audio</string>
 </resources>
