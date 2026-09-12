@@ -1,0 +1,222 @@
+package dev.tsdroid.bridge.audio
+
+import dev.tsdroid.bridge.audio.JitterBuffer.Companion.JB_IDLE_RESET_MS
+import dev.tsdroid.bridge.audio.JitterBuffer.Companion.JB_SHRINK_IDLE_MS
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * 抖动缓冲的回归网。
+ *
+ * 用假解码器（PCM 每个样本 = 包号）和手工推进的 now，把时序逻辑与 JNI/设备完全隔离：
+ * 出帧顺序、去重、判丢、PLC 衰减、静默重置、自适应深度全部可在毫秒级精确复现。
+ */
+class JitterBufferTest {
+
+    /** 假解码：把包里的 16 位包号原样铺成 PCM，便于断言"出的是哪一包" */
+    private val DEC: (ByteArray) -> ShortArray? = { data ->
+        val id = (data[0].toInt() and 0xFF) or ((data[1].toInt() and 0xFF) shl 8)
+        ShortArray(FRAME_SAMPLES) { id.toShort() }
+    }
+
+    private fun pkt(id: Int) = byteArrayOf((id and 0xFF).toByte(), ((id shr 8) and 0xFF).toByte())
+
+    private fun jb() = JitterBuffer(userId = 7, decode = DEC)
+
+    private fun sample(out: ShortArray?): Int {
+        assertNotNull("期望有帧输出", out)
+        return out!![0].toInt()
+    }
+
+    // ── 1) 正常连号：每 tick 一帧真实音频，不产生任何 PLC ──
+    @Test
+    fun consecutivePacketsEmitRealFramesWithoutPlc() {
+        val jb = jb()
+        var t = T0
+        for (id in 0 until 10) {
+            jb.submit(id, pkt(id), t)
+            assertEquals("第 $id 包应按序出帧", id, sample(jb.produceTick(t)))
+            t += 20
+        }
+        assertEquals(0L, jb.plcCount)
+        assertEquals(0L, jb.lostCount)
+        assertEquals(0L, jb.dupDropped)
+    }
+
+    // ── 2) 乱序到达：按包号重排后再出声，不是按到达顺序 ──
+    @Test
+    fun outOfOrderPacketsAreReordered() {
+        val jb = jb()
+        val t = T0
+        jb.submit(0, pkt(0), t)
+        jb.submit(2, pkt(2), t + 20)   // 2 先到
+        jb.submit(1, pkt(1), t + 40)   // 1 后到
+
+        assertEquals(0, sample(jb.produceTick(t)))
+        assertEquals("1 应排在 2 前面出", 1, sample(jb.produceTick(t + 20)))
+        assertEquals(2, sample(jb.produceTick(t + 40)))
+        assertEquals(0L, jb.dupDropped)
+    }
+
+    // ── 3) 重复包：第二份丢弃，不播两遍（否则听感=声音被拉长）──
+    @Test
+    fun duplicatePacketIsDropped() {
+        val jb = jb()
+        val t = T0
+        jb.submit(0, pkt(0), t)
+        jb.submit(0, pkt(0), t + 20)   // 同一包再来一次
+
+        assertEquals(0, sample(jb.produceTick(t)))
+        assertEquals(1L, jb.dupDropped)
+    }
+
+    // ── 4) 缺包：先 PLC 顶住，增益逐帧递减到静音；缺 1 个包不跳号（避免切断连续语音）──
+    @Test
+    fun missingPacketProducesDecayingPlcThenSilence() {
+        val jb = jb()
+        var t = T0
+        jb.submit(0, pkt(0), t)
+        jb.submit(1, pkt(1), t + 20)
+        jb.submit(3, pkt(3), t + 40)   // 缺 2
+        jb.submit(4, pkt(4), t + 60)
+
+        assertEquals(0, sample(jb.produceTick(t)))
+        assertEquals(1, sample(jb.produceTick(t + 20)))
+
+        // 缺 2：PLC 帧（重复上一帧 + 增益递减 0.85 / 0.6 / 0.35），之后静音
+        t += 40
+        val plc = ArrayList<ShortArray?>()
+        repeat(5) { plc.add(jb.produceTick(t)); t += 20 }
+
+        assertEquals("PLC 首帧应是上一帧的 0.85 倍", (1 * 0.85f).toInt(), plc[0]!![0].toInt())
+        assertEquals("第二帧 0.6", (1 * 0.6f).toInt(), plc[1]!![0].toInt())
+        assertEquals("第三帧 0.35", (1 * 0.35f).toInt(), plc[2]!![0].toInt())
+        assertNull("增益耗尽后应静音，不能无限糊", plc[3])
+        assertTrue("应记录到丢包", jb.lostCount > 0)
+        assertTrue("不应跳号：3 还在缓冲里，要原地等", jb.resyncCount == 0L)
+    }
+
+    // ── 5) 静默后重新起播：靠静默重置，而不是走"远期跳变重同步" ──
+    @Test
+    fun idleGapResetsInsteadOfResyncing() {
+        val jb = jb()
+        val t = T0
+        jb.submit(0, pkt(0), t)
+        assertEquals(0, sample(jb.produceTick(t)))
+
+        // 静默超过 JB_IDLE_RESET_MS：pending 空 → 自动重置
+        assertNull(jb.produceTick(t + JB_IDLE_RESET_MS + 20))
+
+        // 新一段说话，包号从很远处起（等价于换人/长时间停顿）
+        val t2 = t + JB_IDLE_RESET_MS + 100
+        jb.submit(100, pkt(100), t2)
+        assertEquals("重置后应把 100 当新起点直接接受", 100, sample(jb.produceTick(t2)))
+        assertEquals("不该走重同步分支", 0L, jb.resyncCount)
+    }
+
+    // ── 6) 预填充：一段说话先屯够 targetSlots 帧才出声 ──
+    @Test
+    fun prefillHoldsBackUntilTargetDepthReached() {
+        val jb = jb()
+        var t = T0
+        // 先用 40ms 的到达间隔把抖动估计顶起来，让 adapt 把目标深度提到 ≥2
+        repeat(80) { i ->
+            jb.submit(i, pkt(i), t)
+            jb.produceTick(t)
+            t += 40
+        }
+        val depth = jb.targetSlots()
+        assertTrue("抖动线路上目标深度应升到 ≥2（实际 $depth）", depth >= 2)
+
+        // 新一段说话：只到 1 帧时不该出声
+        jb.reset()
+        val t2 = t + 1000
+        jb.submit(500, pkt(500), t2)
+        assertNull("只有 1 帧、不足目标深度时应保持静音", jb.produceTick(t2))
+        jb.submit(501, pkt(501), t2 + 20)
+        assertEquals("屯够目标深度后出声", 500, sample(jb.produceTick(t2 + 20)))
+    }
+
+    // ── 7) 自适应升档：一秒内补帧多，说明等得不够 → 目标深度 +1 ──
+    @Test
+    fun depthRisesWhenManyPlcFramesInOneSecond() {
+        val jb = jb()
+        val t = T0
+        jb.submit(0, pkt(0), t)
+        assertEquals(0, sample(jb.produceTick(t)))     // 真实帧 → nextExpected = 1
+
+        // 缓冲里只放包 3（gap=2，在等待窗口内，不触发重同步）→ 期望的 1 一直缺 → 持续 PLC。
+        // 关键是让 pending 非空：一旦 pending 空且静默 >250ms，就会自动 reset，
+        // reset 后 nextExpected=-1，produceTick 直接返回，adapt 从此不再执行（深度也就不会自适应）。
+        jb.submit(3, pkt(3), t + 20)
+        var t2 = t + 20
+        repeat(70) {
+            jb.produceTick(t2)
+            t2 += 20
+        }
+        assertTrue("补帧多应升档（plc=${jb.plcCount}, targetSlots=${jb.targetSlots()}）",
+            jb.targetSlots() >= 2)
+    }
+
+    // ── 8) 自适应降档：线路干净满 JB_SHRINK_IDLE_MS 才回落一档 ──
+    @Test
+    fun depthFallsWhenLineIsClean() {
+        val jb = jb()
+        val t = T0
+        // 先升档（同用例 7：靠持续 PLC 把每秒补帧数顶上去）
+        jb.submit(0, pkt(0), t)
+        jb.produceTick(t)
+        jb.submit(3, pkt(3), t + 20)
+        var tRise = t + 20
+        repeat(70) {
+            jb.produceTick(tRise)
+            tRise += 20
+        }
+        val risen = jb.targetSlots()
+        assertTrue("前置条件：应先升档（实际 $risen）", risen >= 2)
+
+        // 再跑 8 秒完全干净的连号流（间隔稳定 20ms，无补帧、无丢包）
+        jb.reset()                     // 注意：reset 保留 targetSlots（这是设计，不是 bug）
+        val plcBefore = jb.plcCount
+        var id = 200
+        var t2 = tRise + 2000
+        var realFrames = 0
+        // 跑 15 秒干净连号流（无补帧、无丢包）。长度要留够：升档阶段的补帧计数会残留到
+        // 干净流的第一个统计周期，可能再多升一档，所以必须给足"每秒降一档"的回落时间。
+        repeat(750) {
+            jb.submit(id, pkt(id), t2)
+            // 开头有预填充空窗（不足 targetSlots 帧不出声），所以只统计出帧数，不逐帧断言
+            if (jb.produceTick(t2) != null) realFrames++
+            id++
+            t2 += 20
+        }
+        assertEquals("干净连号流不该产生任何补帧", plcBefore, jb.plcCount)
+        assertTrue("干净流应基本每拍都出帧（实际 $realFrames/750）", realFrames >= 740)
+        assertEquals("线路持续干净应一路回落到下限（起于 $risen，jit=${jb.jitterMs()}ms）",
+            1, jb.targetSlots())
+    }
+
+    // ── 9) 边界：最后一个包播完后 pending 为空，不得抛异常 ──
+    @Test
+    fun emptyPendingAfterLastFrameDoesNotThrow() {
+        val jb = jb()
+        val t = T0
+        jb.submit(0, pkt(0), t)
+        assertEquals(0, sample(jb.produceTick(t)))   // 唯一一包播完 → pending 空
+
+        // 之后几拍（离上次收包 < 静默重置阈值）：应继续出 PLC/静音，而不是抛 NoSuchElementException
+        repeat(6) { i ->
+            jb.produceTick(t + 20L * (i + 1))
+        }
+        assertTrue("pending 空时也不该把丢包数算爆", jb.lostCount < 10L)
+    }
+
+    private companion object {
+        /** 起点取远离 0 的值：避开 lastAdaptMs 初值 0 的首次 adapt 边界 */
+        const val T0 = 100_000L
+        const val FRAME_SAMPLES = 960
+    }
+}
