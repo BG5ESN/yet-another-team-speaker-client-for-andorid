@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import dev.tsdroid.MainActivity
 import dev.tsdroid.ui.overlay.FloatingOverlayContent
+import dev.tsdroid.ui.overlay.OverlayState
 import dev.tsdroid.han.R
 import dev.tsdroid.TsDroidApp
 import dev.tsdroid.bridge.AudioBridge
@@ -85,29 +86,11 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
     private var overlayView: ComposeView? = null
     private var overlayLayoutParams: WindowManager.LayoutParams? = null
 
-    private var overlayConnected by mutableStateOf(false)
-    private var overlayChannelName by mutableStateOf<String?>(null)
-    private var overlayActiveSpeakerId by mutableStateOf<Int?>(null)
-    private var overlayActiveSpeakerName by mutableStateOf<String?>(null)
-    private var overlayActiveSpeakerAvatar by mutableStateOf<ImageBitmap?>(null)
-    
-    // Delay mechanism for overlay speaker state changes
-    private var pendingSpeakerId: Int? = null
-    private var speakerUpdateJob: kotlinx.coroutines.Job? = null
-    
-    // Delay mechanism for local user speaking state changes
-    private var pendingLocalSpeaking: Boolean? = null
-    private var localSpeakingJob: kotlinx.coroutines.Job? = null
-    private var delayedLocalSpeaking by mutableStateOf(false)
-    
+    /** 悬浮窗状态（显示状态 + 说话人防抖中间量），定义见 ui/overlay/OverlayState.kt */
+    private val overlayState = OverlayState()
+
     private lateinit var avatarCache: AvatarCache
 
-    // Overlay state
-    private var isOverlayExpanded by mutableStateOf(false)
-    private var positionBeforeExpand: Pair<Int, Int>? = null
-    private var lastSavedX = 100
-    private var lastSavedY = 300
-    
     private var isIntentionalDisconnect = false
     private var latestStartId = 0
     @Volatile private var isStopping = false
@@ -157,49 +140,49 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                 // 多人同时说话取"最响的那个"，不再取无序哈希表里的最后一个（会乱跳/黏住某个人）
                 val speakerId = loudest?.takeIf { it != myId }
                 val speaker = speakerId?.let { id -> users.firstOrNull { u -> u.id == id } }
-                if (speakerId == overlayActiveSpeakerId) return@onEach
+                if (speakerId == overlayState.activeSpeakerId) return@onEach
 
                 if (speakerId != null) {
-                    speakerUpdateJob?.cancel()          // 有人说话：防抖后更新
-                    pendingSpeakerId = speakerId
-                    speakerUpdateJob = serviceScope.launch {
+                    overlayState.speakerUpdateJob?.cancel()          // 有人说话：防抖后更新
+                    overlayState.pendingSpeakerId = speakerId
+                    overlayState.speakerUpdateJob = serviceScope.launch {
                         delay(SPEAKER_DELAY_MS)
-                        if (pendingSpeakerId == speakerId) {
-                            overlayActiveSpeakerId = speakerId
-                            overlayActiveSpeakerName = findUserNickname(speakerId)
+                        if (overlayState.pendingSpeakerId == speakerId) {
+                            overlayState.activeSpeakerId = speakerId
+                            overlayState.activeSpeakerName = findUserNickname(speakerId)
                             val uid = speaker?.uid
                             // 先看服务器给的头像标记（client_flag_avatar）：为空就是"这个人没设头像"，
                             // 此时请求 /avatar_xxx 服务器会回 0x0806 FileInvalidPath —— 不要问不存在的文件
                             val hasAvatar = !uid.isNullOrEmpty() && !speaker?.avatarId.isNullOrEmpty()
                             if (hasAvatar) {
                                 val cached = avatarCache.getAvatar(uid!!)
-                                overlayActiveSpeakerAvatar = cached
+                                overlayState.activeSpeakerAvatar = cached
                                 if (cached == null) {
                                     // 失败最多重试 MAX_RETRIES 次（不再每次说话都 clearMemoryCache 重来一遍）
                                     serviceScope.launch(Dispatchers.IO) {
                                         avatarCache.loadAvatar(uid, tsClient)
                                         val avatar = avatarCache.getAvatar(uid)
                                         withContext(Dispatchers.Main) {
-                                            if (overlayActiveSpeakerId == speakerId) {
-                                                overlayActiveSpeakerAvatar = avatar
+                                            if (overlayState.activeSpeakerId == speakerId) {
+                                                overlayState.activeSpeakerAvatar = avatar
                                             }
                                         }
                                     }
                                 }
                             } else {
-                                overlayActiveSpeakerAvatar = null
+                                overlayState.activeSpeakerAvatar = null
                             }
                         }
                     }
                 } else {
-                    pendingSpeakerId = null             // 没人说话：防抖后清空
-                    speakerUpdateJob?.cancel()
-                    speakerUpdateJob = serviceScope.launch {
+                    overlayState.pendingSpeakerId = null             // 没人说话：防抖后清空
+                    overlayState.speakerUpdateJob?.cancel()
+                    overlayState.speakerUpdateJob = serviceScope.launch {
                         delay(SPEAKER_DELAY_MS)
-                        if (pendingSpeakerId == null) {
-                            overlayActiveSpeakerId = null
-                            overlayActiveSpeakerName = null
-                            overlayActiveSpeakerAvatar = null
+                        if (overlayState.pendingSpeakerId == null) {
+                            overlayState.activeSpeakerId = null
+                            overlayState.activeSpeakerName = null
+                            overlayState.activeSpeakerAvatar = null
                         }
                     }
                 }
@@ -207,7 +190,7 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
             .launchIn(serviceScope)
 
         tsClient.state.onEach { state ->
-            overlayConnected = state == dev.tslib.ConnectionState.CONNECTED
+            overlayState.connected = state == dev.tslib.ConnectionState.CONNECTED
             updateOverlayChannelName()
             updateNotification()
         }.launchIn(serviceScope)
@@ -224,15 +207,15 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
         // Listen to local voice activity and apply delay mechanism
         audioBridge.isLocalVoiceActive.onEach { isSpeaking ->
             // Cancel any pending local speaking state change
-            localSpeakingJob?.cancel()
-            pendingLocalSpeaking = isSpeaking
+            overlayState.localSpeakingJob?.cancel()
+            overlayState.pendingLocalSpeaking = isSpeaking
             
             // Delay local speaking state update to avoid flickering
-            localSpeakingJob = serviceScope.launch {
+            overlayState.localSpeakingJob = serviceScope.launch {
                 delay(SPEAKER_DELAY_MS)
                 // Only update if still the pending state
-                if (pendingLocalSpeaking == isSpeaking) {
-                    delayedLocalSpeaking = isSpeaking
+                if (overlayState.pendingLocalSpeaking == isSpeaking) {
+                    overlayState.delayedLocalSpeaking = isSpeaking
                     
                     // Force refresh local user avatar when speaking starts
                     if (isSpeaking) {
@@ -246,8 +229,8 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                                 avatarCache.loadAvatar(localUid, tsClient)
                                 val avatar = avatarCache.getAvatar(localUid)
                                 withContext(Dispatchers.Main) {
-                                    if (overlayActiveSpeakerId == myId) {
-                                        overlayActiveSpeakerAvatar = avatar
+                                    if (overlayState.activeSpeakerId == myId) {
+                                        overlayState.activeSpeakerAvatar = avatar
                                     }
                                 }
                             }
@@ -282,15 +265,15 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                     }
                     
                     // Update the current speaker avatar if someone is speaking
-                    val currentSpeakerId = overlayActiveSpeakerId
+                    val currentSpeakerId = overlayState.activeSpeakerId
                     if (currentSpeakerId != null) {
                         val speakerUser = currentUsers.find { it.id == currentSpeakerId }
                         val speakerUid = speakerUser?.uid
                         if (!speakerUid.isNullOrEmpty()) {
                             val updatedAvatar = avatarCache.getAvatar(speakerUid)
                             withContext(Dispatchers.Main) {
-                                if (overlayActiveSpeakerId == currentSpeakerId) {
-                                    overlayActiveSpeakerAvatar = updatedAvatar
+                                if (overlayState.activeSpeakerId == currentSpeakerId) {
+                                    overlayState.activeSpeakerAvatar = updatedAvatar
                                 }
                             }
                         }
@@ -520,8 +503,8 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
             gravity = Gravity.TOP or Gravity.START
-            x = lastSavedX
-            y = lastSavedY
+            x = overlayState.lastSavedX
+            y = overlayState.lastSavedY
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
@@ -547,33 +530,33 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                 // Listen to local voice activity and apply delay mechanism
                 LaunchedEffect(isLocalVoiceActive) {
                     // Cancel any pending local speaking state change
-                    localSpeakingJob?.cancel()
-                    pendingLocalSpeaking = isLocalVoiceActive
+                    overlayState.localSpeakingJob?.cancel()
+                    overlayState.pendingLocalSpeaking = isLocalVoiceActive
                     
                     // Delay local speaking state update to avoid flickering
                     delay(SPEAKER_DELAY_MS)
                     // Only update if still the pending state
-                    if (pendingLocalSpeaking == isLocalVoiceActive) {
-                        delayedLocalSpeaking = isLocalVoiceActive
+                    if (overlayState.pendingLocalSpeaking == isLocalVoiceActive) {
+                        overlayState.delayedLocalSpeaking = isLocalVoiceActive
                     }
                 }
                 
                 FloatingOverlayContent(
-                    connected = overlayConnected,
-                    channelName = overlayChannelName,
-                    activeSpeakerName = overlayActiveSpeakerName,
-                    activeSpeakerAvatar = overlayActiveSpeakerAvatar,
-                    isLocalVoiceActive = delayedLocalSpeaking,
-                    isExpanded = isOverlayExpanded,
+                    connected = overlayState.connected,
+                    channelName = overlayState.channelName,
+                    activeSpeakerName = overlayState.activeSpeakerName,
+                    activeSpeakerAvatar = overlayState.activeSpeakerAvatar,
+                    isLocalVoiceActive = overlayState.delayedLocalSpeaking,
+                    isExpanded = overlayState.expanded,
                     onToggleExpand = { 
                         overlayLayoutParams?.let { layout ->
-                            if (!isOverlayExpanded) {
+                            if (!overlayState.expanded) {
                                 // Saving position before expanding
-                                positionBeforeExpand = Pair(layout.x, layout.y)
-                                Log.d(TAG, "Saved position before expand: ${positionBeforeExpand}")
+                                overlayState.positionBeforeExpand = Pair(layout.x, layout.y)
+                                Log.d(TAG, "Saved position before expand: ${overlayState.positionBeforeExpand}")
                             } else {
                                 // Restore position when collapsing
-                                positionBeforeExpand?.let { (x, y) ->
+                                overlayState.positionBeforeExpand?.let { (x, y) ->
                                     layout.x = x
                                     layout.y = y
                                     try {
@@ -581,10 +564,10 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                                     } catch (_: Exception) {}
                                     Log.d(TAG, "Restored position after collapse: ($x, $y)")
                                 }
-                                positionBeforeExpand = null
+                                overlayState.positionBeforeExpand = null
                             }
                         }
-                        isOverlayExpanded = !isOverlayExpanded 
+                        overlayState.expanded = !overlayState.expanded 
                     },
                     onDrag = { dx, dy ->
                         overlayLayoutParams?.let { layout ->
@@ -596,8 +579,8 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                             layout.y = (layout.y + dy.toInt()).coerceIn(0, maxOf(0, maxY))
                             
                             // Update cached position for persistence
-                            lastSavedX = layout.x
-                            lastSavedY = layout.y
+                            overlayState.lastSavedX = layout.x
+                            overlayState.lastSavedY = layout.y
                             
                             try {
                                 windowManager.updateViewLayout(this, layout)
@@ -632,7 +615,7 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
                     onClose = { hideFloatingWindow() },
                     // 原先这四个是 Composable 从 Service 成员里隐式捕获的，现在显式传入
                     myId = tsClient.clientId,
-                    activeSpeakerId = overlayActiveSpeakerId,
+                    activeSpeakerId = overlayState.activeSpeakerId,
                     avatarCache = avatarCache,
                     tsClient = tsClient,
                 )
@@ -647,13 +630,13 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
     private fun updateOverlayChannelName() {
         val myId = tsClient.clientId ?: return
         val currentChannelId = tsClient.users.value.find { it.id == myId }?.channelId
-        overlayChannelName = currentChannelId?.let { channelId ->
+        overlayState.channelName = currentChannelId?.let { channelId ->
             tsClient.channels.value.find { it.id == channelId }?.name
         }
     }
 
     private fun refreshActiveSpeakerName() {
-        overlayActiveSpeakerName = overlayActiveSpeakerId?.let { findUserNickname(it) }
+        overlayState.activeSpeakerName = overlayState.activeSpeakerId?.let { findUserNickname(it) }
     }
 
     private fun findUserNickname(userId: Int): String? {
@@ -666,8 +649,8 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
             try {
                 // Save current position before removing the view
                 overlayLayoutParams?.let { params ->
-                    lastSavedX = params.x
-                    lastSavedY = params.y
+                    overlayState.lastSavedX = params.x
+                    overlayState.lastSavedY = params.y
                     saveCachedPosition()
                 }
                 windowManager.removeViewImmediate(view)
@@ -676,24 +659,24 @@ class TsConnectionService : LifecycleService(), ViewModelStoreOwner, SavedStateR
         }
         overlayView = null
         overlayLayoutParams = null
-        isOverlayExpanded = false
+        overlayState.expanded = false
     }
     
     private fun saveCachedPosition() {
         val prefs = getSharedPreferences("floating_window_prefs", Context.MODE_PRIVATE)
         prefs.edit().apply {
-            putInt("position_x", lastSavedX)
-            putInt("position_y", lastSavedY)
+            putInt("position_x", overlayState.lastSavedX)
+            putInt("position_y", overlayState.lastSavedY)
             apply()
         }
-        Log.d(TAG, "Saved floating window position: ($lastSavedX, $lastSavedY)")
+        Log.d(TAG, "Saved floating window position: ($overlayState.lastSavedX, $overlayState.lastSavedY)")
     }
     
     private fun loadSavedPosition() {
         val prefs = getSharedPreferences("floating_window_prefs", Context.MODE_PRIVATE)
-        lastSavedX = prefs.getInt("position_x", 100)
-        lastSavedY = prefs.getInt("position_y", 300)
-        Log.d(TAG, "Loaded floating window position: ($lastSavedX, $lastSavedY)")
+        overlayState.lastSavedX = prefs.getInt("position_x", 100)
+        overlayState.lastSavedY = prefs.getInt("position_y", 300)
+        Log.d(TAG, "Loaded floating window position: ($overlayState.lastSavedX, $overlayState.lastSavedY)")
     }
 
     override fun onDestroy() {
