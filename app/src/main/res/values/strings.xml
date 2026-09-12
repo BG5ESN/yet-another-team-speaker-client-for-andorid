@@ -133,4 +133,22 @@
     <string name="mic_test_hold">Maintenir pour tester le micro</string>
     <string name="mic_test_speaking">Parle</string>
     <string name="mic_test_silent">Silence</string>
+
+    <!-- 输出设备选择（通话音频路由）-->
+    <string name="route_output_device">Sortie audio</string>
+    <string name="route_follow_system">Par défaut du système</string>
+    <string name="route_no_devices">Aucun périphérique de sortie disponible</string>
+    <string name="route_type_earpiece">Écouteur</string>
+    <string name="route_type_speaker">Haut-parleur</string>
+    <string name="route_type_wired_headset">Casque filaire</string>
+    <string name="route_type_wired_headphones">Écouteurs filaires</string>
+    <string name="route_type_bluetooth_sco">Bluetooth (appels)</string>
+    <string name="route_type_bluetooth_a2dp">Bluetooth (musique)</string>
+    <string name="route_type_usb">Audio USB</string>
+    <string name="route_type_usb_headset">Casque USB</string>
+    <string name="route_type_ble">Audio Bluetooth LE</string>
+    <string name="route_type_aux">Ligne AUX</string>
+    <string name="route_type_hdmi">HDMI</string>
+    <string name="route_type_dock">Station d\'accueil</string>
+    <string name="route_type_other">Autre périphérique audio</string>
 </resources>

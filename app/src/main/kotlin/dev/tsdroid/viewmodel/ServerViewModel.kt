@@ -8,6 +8,8 @@ import androidx.lifecycle.viewModelScope
 import androidx.compose.ui.graphics.ImageBitmap
 import dev.tsdroid.bridge.AvatarCache
 import dev.tsdroid.bridge.AudioBridge
+import dev.tsdroid.bridge.audio.AudioRouteDevice
+import dev.tsdroid.bridge.audio.FOLLOW_SYSTEM
 import dev.tsdroid.bridge.IconCache
 import dev.tsdroid.bridge.TsClient
 import dev.tsdroid.model.ChatMessage
@@ -36,6 +38,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -104,6 +107,16 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _isOutputMuted = MutableStateFlow(false)
     val isOutputMuted: StateFlow<Boolean> = _isOutputMuted.asStateFlow()
+
+    // 输出设备列表与当前选择。和 _isLocalTalking 同理用镜像而不是 getter：
+    // audioBridge 是可空的，Compose 需要一个"构造时就存在、之后还能更新"的流。
+    private val _routeDevices = MutableStateFlow<List<AudioRouteDevice>>(emptyList())
+    /** 可选的输出设备（扬声器 / 听筒 / 耳机 / 蓝牙），插拔时自动刷新 */
+    val routeDevices: StateFlow<List<AudioRouteDevice>> = _routeDevices.asStateFlow()
+
+    private val _routeSelectedId = MutableStateFlow(FOLLOW_SYSTEM)
+    /** 当前选定的输出设备 id；[FOLLOW_SYSTEM] = 跟随系统自动路由 */
+    val routeSelectedId: StateFlow<Int> = _routeSelectedId.asStateFlow()
 
     /**
      * 未绑定服务时的回落流。**必须是同一个实例**：
@@ -228,6 +241,8 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
             audioBridge = service.audioBridge
             audioBridge?.setMutedUserIds(_mutedUserIds.value)
             audioBridge?.gateTransmissionByVoiceActivity = !_isPttMode.value
+            // 恢复上次选的输出设备（设备已不在时 AudioRouteManager 会自动回退跟随系统）
+            restoreRouteDevice()
             connectionService = service
             queriedPermChannels.clear()
 
@@ -318,6 +333,13 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
             }
             viewModelScope.launch {
                 service.audioBridge.isOutputMuted.collect { _isOutputMuted.value = it }
+            }
+            // 输出设备：列表随插拔刷新，选中项跟着 AudioBridge 走
+            viewModelScope.launch {
+                service.audioBridge.routeDevices.collect { _routeDevices.value = it }
+            }
+            viewModelScope.launch {
+                service.audioBridge.routeSelectedId.collect { _routeSelectedId.value = it }
             }
 
             // Start event loop (guarded by AtomicBoolean — safe if already running)
@@ -508,6 +530,37 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         audioBridge?.toggleOutputMute()
     }
 
+    /**
+     * 选择通话音频的输出设备。传 [FOLLOW_SYSTEM] 交回系统自动路由。
+     *
+     * 只有真的选到了设备才落盘 —— 否则会把一次失败的点击记成"跟随系统"，
+     * 下次通话就悄悄把用户的选择清掉了。
+     */
+    fun selectRouteDevice(id: Int) {
+        val dev = audioBridge?.selectRouteDevice(id)
+        when {
+            dev != null -> viewModelScope.launch {
+                settingsStore.setRouteDevice(dev.id, dev.type, dev.productName)
+            }
+            id == FOLLOW_SYSTEM -> viewModelScope.launch {
+                settingsStore.setRouteDevice(FOLLOW_SYSTEM, 0, "")
+            }
+        }
+    }
+
+    /**
+     * 把落盘的设备选择恢复到 AudioBridge。
+     *
+     * 除了 id 还存 type + 商品名：蓝牙耳机重连后 id 会变，只认 id 会认不出那副耳机。
+     * 认不出来时 AudioRouteManager 回退"跟随系统"，不会哑掉。
+     */
+    private suspend fun restoreRouteDevice() {
+        val id = settingsStore.routeDeviceId.first()
+        val type = settingsStore.routeDeviceType.first()
+        val name = settingsStore.routeDeviceName.first()
+        audioBridge?.restoreRouteDevice(id, type, name)
+    }
+
     fun toggleMuteUser(clientId: Int) {
         val updated = if (clientId in _mutedUserIds.value) {
             _mutedUserIds.value - clientId
@@ -621,6 +674,8 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         tsClient = null
         audioBridge = null
         connectionService = null
+        _routeDevices.value = emptyList()
+        _routeSelectedId.value = FOLLOW_SYSTEM
         super.onCleared()
     }
 

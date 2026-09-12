@@ -132,4 +132,22 @@
     <string name="mic_test_hold">按住测试麦克风</string>
     <string name="mic_test_speaking">说话中</string>
     <string name="mic_test_silent">静音</string>
+
+    <!-- 输出设备选择（通话音频路由）-->
+    <string name="route_output_device">声音输出</string>
+    <string name="route_follow_system">跟随系统</string>
+    <string name="route_no_devices">没有可用的输出设备</string>
+    <string name="route_type_earpiece">听筒</string>
+    <string name="route_type_speaker">扬声器</string>
+    <string name="route_type_wired_headset">有线耳机</string>
+    <string name="route_type_wired_headphones">有线耳机（无麦克风）</string>
+    <string name="route_type_bluetooth_sco">蓝牙通话</string>
+    <string name="route_type_bluetooth_a2dp">蓝牙音乐</string>
+    <string name="route_type_usb">USB 音频</string>
+    <string name="route_type_usb_headset">USB 耳机</string>
+    <string name="route_type_ble">蓝牙 LE 音频</string>
+    <string name="route_type_aux">AUX 线路</string>
+    <string name="route_type_hdmi">HDMI</string>
+    <string name="route_type_dock">底座</string>
+    <string name="route_type_other">其他音频设备</string>
 </resources>

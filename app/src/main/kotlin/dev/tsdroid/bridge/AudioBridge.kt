@@ -16,6 +16,9 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import dev.tslib.AudioConfig
 import dev.tslib.OpusCodec
+import dev.tsdroid.bridge.audio.AudioRouteDevice
+import dev.tsdroid.bridge.audio.AudioRouteManager
+import dev.tsdroid.bridge.audio.FOLLOW_SYSTEM
 import dev.tsdroid.bridge.audio.JitterBuffer
 import dev.tsdroid.bridge.audio.VOICE_HANGOVER_MS
 import dev.tsdroid.bridge.audio.dbfsOf
@@ -74,6 +77,9 @@ class AudioBridge(
     private val userDecoders = ConcurrentHashMap<Int, OpusCodec>()
     /** 每用户抖动缓冲：按包号去重 + 重排 + 缺包隐藏 */
     private val userJitter = ConcurrentHashMap<Int, JitterBuffer>()
+
+    /** 通话音频的输出/采集设备路由（扬声器 / 听筒 / 耳机 / 蓝牙）*/
+    private val audioRoute = AudioRouteManager(context)
 
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
@@ -245,6 +251,8 @@ class AudioBridge(
             encoder = OpusCodec(audioConfig)
             startAudioStats()
             requestAudioFocus()
+            // 先启动设备监听：refresh() 会填好设备列表，initAudioTrack() 才能立刻应用偏好
+            audioRoute.start()
             initAudioTrack()
             startPlaybackLoop()
             Log.i(TAG, "initialize() 完成: track=${audioTrack?.hashCode()} state=${audioTrack?.state} " +
@@ -295,6 +303,8 @@ class AudioBridge(
             return
         }
         audioRecord = record
+        // 采集也跟着走：选了蓝牙耳机就从耳机麦进（与输出成对，符合用户对"切到耳机"的预期）
+        audioRoute.applyTo(record)
         _isCapturing.value = true
         noiseSuppressor?.release()
         noiseSuppressor = null
@@ -417,6 +427,9 @@ class AudioBridge(
         } catch (e: Throwable) {
             Log.e(TAG, "AudioTrack.play() 抛异常", e)
         }
+        // 轨道每次重建都要重新应用输出设备偏好 —— setPreferredDevice 是挂在轨道实例上的，
+        // 不重新应用的话，重连一次偏好就丢了（回到系统默认路由）。
+        audioRoute.applyTo(audioTrack)
     }
 
     /**
@@ -712,6 +725,30 @@ class AudioBridge(
         setOutputMuted(!_isOutputMuted.value)
     }
 
+    // ── 输出设备路由 ──
+
+    /** 可选的输出设备（插拔 / 蓝牙连断时自动刷新）*/
+    val routeDevices: StateFlow<List<AudioRouteDevice>> = audioRoute.devices
+
+    /** 当前选定的设备 id；[FOLLOW_SYSTEM](-1) = 跟随系统 */
+    val routeSelectedId: StateFlow<Int> = audioRoute.selectedId
+
+    /** 选择输出设备。传 [FOLLOW_SYSTEM] 交回系统自动路由。返回选中的设备（找不到为 null）*/
+    fun selectRouteDevice(id: Int): AudioRouteDevice? {
+        val dev = audioRoute.select(id)
+        // 立刻作用到两条流 —— 用户点了就要马上听到变化，不能等下次重建轨道
+        audioRoute.applyTo(audioTrack)
+        audioRoute.applyTo(audioRecord)
+        return dev
+    }
+
+    /** 把上次保存的选择恢复过来（设备已不在则自动回退跟随系统）*/
+    fun restoreRouteDevice(id: Int, type: Int, name: String) {
+        audioRoute.restore(id, type, name)
+        audioRoute.applyTo(audioTrack)
+        audioRoute.applyTo(audioRecord)
+    }
+
     fun release() {
         Log.i(TAG, "release() 被调用: track=${audioTrack?.hashCode()} state=${audioTrack?.state} " +
                 "written=$writtenFrames head=${try { audioTrack?.playbackHeadPosition } catch (_: Exception) { -1 }} " +
@@ -740,6 +777,7 @@ class AudioBridge(
         }
         userDecoders.clear()
         userJitter.clear()
+        audioRoute.stop()
     }
 
     private fun shortsToBytes(shorts: ShortArray): ByteArray {

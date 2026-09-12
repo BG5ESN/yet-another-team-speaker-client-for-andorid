@@ -93,4 +93,22 @@
     <string name="mic_test_hold">Hold to test mic</string>
     <string name="mic_test_speaking">Speaking</string>
     <string name="mic_test_silent">Silent</string>
+
+    <!-- Output device selection (call audio routing) -->
+    <string name="route_output_device">Audio output</string>
+    <string name="route_follow_system">System default</string>
+    <string name="route_no_devices">No output device available</string>
+    <string name="route_type_earpiece">Earpiece</string>
+    <string name="route_type_speaker">Speaker</string>
+    <string name="route_type_wired_headset">Wired headset</string>
+    <string name="route_type_wired_headphones">Wired headphones</string>
+    <string name="route_type_bluetooth_sco">Bluetooth (calls)</string>
+    <string name="route_type_bluetooth_a2dp">Bluetooth (music)</string>
+    <string name="route_type_usb">USB audio</string>
+    <string name="route_type_usb_headset">USB headset</string>
+    <string name="route_type_ble">Bluetooth LE audio</string>
+    <string name="route_type_aux">AUX line</string>
+    <string name="route_type_hdmi">HDMI</string>
+    <string name="route_type_dock">Dock</string>
+    <string name="route_type_other">Other audio device</string>
 </resources>

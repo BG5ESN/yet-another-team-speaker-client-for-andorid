@@ -42,9 +42,13 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Speaker
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -86,7 +90,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.media.AudioDeviceInfo
 import dev.tsdroid.han.R
+import dev.tsdroid.bridge.audio.AudioRouteDevice
+import dev.tsdroid.bridge.audio.FOLLOW_SYSTEM
 import dev.tslib.ConnectionState
 import dev.tslib.User
 import dev.tsdroid.ui.component.ChannelTree
@@ -109,6 +116,9 @@ fun ServerScreen(
     val channels by viewModel.channels.collectAsStateWithLifecycle()
     val users by viewModel.users.collectAsStateWithLifecycle()
     val channelIcons by viewModel.channelIcons.collectAsStateWithLifecycle()
+    val routeDevices by viewModel.routeDevices.collectAsStateWithLifecycle()
+    val routeSelectedId by viewModel.routeSelectedId.collectAsStateWithLifecycle()
+    var routeMenuOpen by remember { mutableStateOf(false) }
     val userAvatars by viewModel.avatars.collectAsStateWithLifecycle()
     val serverInfo by viewModel.serverInfo.collectAsStateWithLifecycle()
     val channelMessages by viewModel.channelMessages.collectAsStateWithLifecycle()
@@ -272,6 +282,55 @@ fun ServerScreen(
                 actions = {
                     IconButton(onClick = { viewModel.toggleFileManager() }) {
                         Icon(Icons.Default.Folder, contentDescription = stringResource(R.string.file_manager))
+                    }
+                    // 通话中切输出设备（扬声器 / 听筒 / 耳机 / 蓝牙）。
+                    // 放这里而不是设置页：设置页得先退出房间才能进，切设备就失去意义了。
+                    Box {
+                        IconButton(onClick = { routeMenuOpen = true }) {
+                            Icon(
+                                Icons.Default.Speaker,
+                                contentDescription = stringResource(R.string.route_output_device),
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = routeMenuOpen,
+                            onDismissRequest = { routeMenuOpen = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.route_follow_system)) },
+                                onClick = {
+                                    viewModel.selectRouteDevice(FOLLOW_SYSTEM)
+                                    routeMenuOpen = false
+                                },
+                                trailingIcon = {
+                                    if (routeSelectedId == FOLLOW_SYSTEM) {
+                                        Icon(Icons.Default.Check, contentDescription = null)
+                                    }
+                                },
+                            )
+                            if (routeDevices.isEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.route_no_devices)) },
+                                    onClick = {},
+                                    enabled = false,
+                                )
+                            } else {
+                                routeDevices.forEach { dev ->
+                                    DropdownMenuItem(
+                                        text = { Text(routeDeviceLabel(dev)) },
+                                        onClick = {
+                                            viewModel.selectRouteDevice(dev.id)
+                                            routeMenuOpen = false
+                                        },
+                                        trailingIcon = {
+                                            if (dev.id == routeSelectedId) {
+                                                Icon(Icons.Default.Check, contentDescription = null)
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                        }
                     }
                     IconButton(onClick = { viewModel.disconnect() }) {
                         Icon(Icons.AutoMirrored.Filled.ExitToApp, contentDescription = stringResource(R.string.disconnect))
@@ -784,4 +843,36 @@ fun ChatPanel(
             }
         }
     }
+}
+
+/** 设备显示名：有商品名就"商品名 · 类型"，内置设备（扬声器/听筒）没有商品名就只显示类型 */
+@Composable
+private fun routeDeviceLabel(dev: AudioRouteDevice): String {
+    val typeName = stringResource(routeTypeRes(dev.type))
+    return if (dev.productName.isBlank()) typeName else "${dev.productName} · $typeName"
+}
+
+/**
+ * 设备类型 → 字符串资源。
+ *
+ * TYPE_BLE_* 是 API 31 才引入的常量，但这里只是内联成 int，低版本上根本不会取到那个分支，
+ * 加注解压掉 lint 的 InlinedApi 提示（不是 NewApi，没有运行时风险）。
+ */
+@Suppress("InlinedApi")
+private fun routeTypeRes(type: Int): Int = when (type) {
+    AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> R.string.route_type_earpiece
+    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> R.string.route_type_speaker
+    AudioDeviceInfo.TYPE_WIRED_HEADSET -> R.string.route_type_wired_headset
+    AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> R.string.route_type_wired_headphones
+    AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> R.string.route_type_bluetooth_sco
+    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> R.string.route_type_bluetooth_a2dp
+    AudioDeviceInfo.TYPE_USB_DEVICE,
+    AudioDeviceInfo.TYPE_USB_ACCESSORY -> R.string.route_type_usb
+    AudioDeviceInfo.TYPE_USB_HEADSET -> R.string.route_type_usb_headset
+    AudioDeviceInfo.TYPE_BLE_HEADSET,
+    AudioDeviceInfo.TYPE_BLE_SPEAKER -> R.string.route_type_ble
+    AudioDeviceInfo.TYPE_AUX_LINE -> R.string.route_type_aux
+    AudioDeviceInfo.TYPE_HDMI -> R.string.route_type_hdmi
+    AudioDeviceInfo.TYPE_DOCK -> R.string.route_type_dock
+    else -> R.string.route_type_other
 }

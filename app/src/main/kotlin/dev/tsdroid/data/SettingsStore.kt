@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -18,6 +19,10 @@ private val KEY_LANGUAGE = stringPreferencesKey("language")
 private val KEY_ENABLE_FLOATING_WINDOW = booleanPreferencesKey("enable_floating_window")
 private val KEY_NOISE_SUPPRESSION = booleanPreferencesKey("noise_suppression")
 private val KEY_RING_THRESHOLD_DB = floatPreferencesKey("ring_threshold_db")
+// 输出设备路由：跟随系统存 -1；否则存 id + type + 名字（id 会在蓝牙重连后变，名字是兜底）
+private val KEY_ROUTE_DEVICE_ID = intPreferencesKey("route_device_id")
+private val KEY_ROUTE_DEVICE_TYPE = intPreferencesKey("route_device_type")
+private val KEY_ROUTE_DEVICE_NAME = stringPreferencesKey("route_device_name")
 
 class SettingsStore(private val context: Context) {
 
@@ -69,5 +74,26 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setRingThresholdDb(db: Float) {
         context.settingsDataStore.edit { it[KEY_RING_THRESHOLD_DB] = db }
+    }
+
+    /**
+     * 输出设备选择：id = -1 表示跟随系统。
+     * 存 type + name 是因为蓝牙耳机重连后 id 会变，只认 id 就认不出那副耳机了。
+     */
+    val routeDeviceId: Flow<Int> = context.settingsDataStore.data
+        .map { it[KEY_ROUTE_DEVICE_ID] ?: -1 }
+
+    val routeDeviceType: Flow<Int> = context.settingsDataStore.data
+        .map { it[KEY_ROUTE_DEVICE_TYPE] ?: 0 }
+
+    val routeDeviceName: Flow<String> = context.settingsDataStore.data
+        .map { it[KEY_ROUTE_DEVICE_NAME] ?: "" }
+
+    suspend fun setRouteDevice(id: Int, type: Int, name: String) {
+        context.settingsDataStore.edit {
+            it[KEY_ROUTE_DEVICE_ID] = id
+            it[KEY_ROUTE_DEVICE_TYPE] = type
+            it[KEY_ROUTE_DEVICE_NAME] = name
+        }
     }
 }
