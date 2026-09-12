@@ -64,6 +64,14 @@ android {
         getByName("main") {
             java.srcDirs("src/main/java", "src/main/kotlin")
         }
+        getByName("test") {
+            java.srcDirs("src/test/java", "src/test/kotlin")
+        }
+    }
+
+    testOptions {
+        // 纯逻辑单测会碰到 android.util.Log：默认实现抛 "not mocked"，这里退化为 no-op
+        unitTests.isReturnDefaultValues = true
     }
 }
 
@@ -105,4 +113,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.coil.compose)
     debugImplementation(libs.androidx.ui.tooling)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 }
