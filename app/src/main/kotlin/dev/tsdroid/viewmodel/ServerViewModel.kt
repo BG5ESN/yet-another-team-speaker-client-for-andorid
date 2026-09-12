@@ -1,25 +1,13 @@
 package dev.tsdroid.viewmodel
 
 import android.app.Application
-import android.content.ComponentName
-import android.content.ContentValues
-import android.content.Context
-import android.content.Intent
-import android.content.ServiceConnection
-import android.graphics.BitmapFactory
-import android.os.Build
-import android.os.Environment
-import android.os.IBinder
-import android.provider.MediaStore
 import android.util.Log
 import android.widget.Toast
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.compose.ui.graphics.ImageBitmap
 import dev.tsdroid.bridge.AvatarCache
 import dev.tsdroid.bridge.AudioBridge
-import dev.tsdroid.bridge.FileCache
 import dev.tsdroid.bridge.IconCache
 import dev.tsdroid.bridge.TsClient
 import dev.tsdroid.model.ChatMessage
@@ -31,6 +19,7 @@ import dev.tsdroid.model.TsFileEntry
 import dev.tsdroid.han.R
 import dev.tsdroid.data.BookmarkStore
 import dev.tsdroid.data.MessageStore
+import dev.tsdroid.data.FileTransferController
 import dev.tsdroid.data.SettingsStore
 import dev.tsdroid.service.TsConnectionService
 import dev.tslib.Channel
@@ -54,6 +43,9 @@ import kotlinx.coroutines.withContext
 class ServerViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "ServerViewModel"
+
+        /** 聊天里要按图片渲染的扩展名（上传和分享两条路径共用一份） */
+        private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
     }
 
     private val messageStore = MessageStore(application)
@@ -61,17 +53,9 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
     private val settingsStore = SettingsStore(application)
     private val iconCache = IconCache(application.cacheDir)
     private val avatarCache = AvatarCache(application.cacheDir)
-    private val fileCache = FileCache(application)
     private var serverAddress: String? = null
     private var saveJob: Job? = null
     // In-memory cache: avoids re-reading from disk + re-decoding for the same image
-    private val downloadCache = mutableMapOf<String, StateFlow<DownloadState>>()
-
-    private val _previewImageBytes = MutableStateFlow<ByteArray?>(null)
-    val previewImageBytes: StateFlow<ByteArray?> = _previewImageBytes.asStateFlow()
-    private val _previewImageName = MutableStateFlow<String?>(null)
-    val previewImageName: StateFlow<String?> = _previewImageName.asStateFlow()
-
     private var tsClient: TsClient? = null
     private var audioBridge: AudioBridge? = null
     private var connectionService: TsConnectionService? = null
@@ -149,18 +133,6 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         .stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
     // File manager state
-    private val _fileManagerOpen = MutableStateFlow(false)
-    val fileManagerOpen: StateFlow<Boolean> = _fileManagerOpen.asStateFlow()
-
-    private val _fileList = MutableStateFlow<List<TsFileEntry>>(emptyList())
-    val fileList: StateFlow<List<TsFileEntry>> = _fileList.asStateFlow()
-
-    private val _currentFilePath = MutableStateFlow("/")
-    val currentFilePath: StateFlow<String> = _currentFilePath.asStateFlow()
-
-    private val _fileManagerLoading = MutableStateFlow(false)
-    val fileManagerLoading: StateFlow<Boolean> = _fileManagerLoading.asStateFlow()
-
     /** Permission hints for the current channel (bitflags from Channel.PERM_*) */
     val currentChannelPermissions: StateFlow<Long> = combine(_channels, _rawUsers) { channels, users ->
         val myId = tsClient?.clientId ?: return@combine 0L
@@ -536,383 +508,85 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         return _rawUsers.value.find { it.id == myId }?.channelId ?: 0
     }
 
-    fun uploadAndSendFile(fileName: String, data: ByteArray, isPrivate: Boolean, targetId: Int?) {
-        val client = tsClient ?: return
-        val channelId = currentChannelId()
-        if (channelId == 0L) return
-        viewModelScope.launch {
-            val path = "/$fileName"
-            val success = client.uploadFile(channelId, path, data, overwrite = true)
-            if (success) {
-                val addr = serverAddress ?: "localhost"
-                val host = addr.substringBefore(':')
-                val port = addr.substringAfter(':', "9987")
-                val fileDateTime = System.currentTimeMillis() / 1000
-                val ts3Url = "ts3file://${host}?port=${port}&channel=${channelId}" +
-                    "&path=/&filename=${fileName}&isDir=0&size=${data.size}&fileDateTime=${fileDateTime}"
+    // ------------------------------ 文件传输 ------------------------------
+    // 实现全在 FileTransferController（批次4 从本类抽出）。这里只做转发：
+    // ① UI 的调用点一行不用改；② "把消息插进聊天流"这类跨模块动作留在 ViewModel 里。
 
-                val ext = fileName.substringAfterLast('.', "").lowercase()
-                val isImage = ext in setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
-                val attachment = FileAttachment(fileName, data.size.toLong(), fileId = "", isImage, channelId = channelId)
-                val meSender = getApplication<Application>().getString(R.string.me_sender)
+    private val fileTransfer = FileTransferController(
+        appContext = getApplication(),
+        scope = viewModelScope,
+        client = { tsClient },
+        channelId = { currentChannelId() },
+        serverAddress = { serverAddress },
+    )
 
-                if (isPrivate && targetId != null) {
-                    tsClient?.sendPrivateMessage(targetId, ts3Url)
-                    val msg = ChatMessage(sender = meSender, text = fileName, isMe = true, isPrivate = true, senderId = targetId, fileAttachment = attachment)
-                    val current = _privateMessages.value.toMutableMap()
-                    current[targetId] = (current[targetId] ?: emptyList()) + msg
-                    _privateMessages.value = current
-                } else {
-                    tsClient?.sendChannelMessage(ts3Url)
-                    val msg = ChatMessage(sender = meSender, text = fileName, isMe = true, fileAttachment = attachment)
-                    _channelMessages.value = _channelMessages.value + msg
-                }
-                scheduleSave()
-            }
-        }
-    }
+    val fileManagerOpen: StateFlow<Boolean> get() = fileTransfer.fileManagerOpen
+    val fileList: StateFlow<List<TsFileEntry>> get() = fileTransfer.fileList
+    val currentFilePath: StateFlow<String> get() = fileTransfer.currentFilePath
+    val fileManagerLoading: StateFlow<Boolean> get() = fileTransfer.fileManagerLoading
+    val previewImageBytes: StateFlow<ByteArray?> get() = fileTransfer.previewImageBytes
+    val previewImageName: StateFlow<String?> get() = fileTransfer.previewImageName
+
+    fun toggleFileManager() = fileTransfer.toggleFileManager()
+    fun closeFileManager() = fileTransfer.closeFileManager()
+    fun refreshFileList() = fileTransfer.refreshFileList()
+    fun navigateToFolder(folderName: String) = fileTransfer.navigateToFolder(folderName)
+    fun navigateUp() = fileTransfer.navigateUp()
+    fun deleteFileInChannel(name: String) = fileTransfer.deleteFile(name)
+    fun renameFileInChannel(oldName: String, newName: String) = fileTransfer.renameFile(oldName, newName)
+    fun createDirectoryInChannel(dirName: String) = fileTransfer.createDirectory(dirName)
+    fun uploadFileToChannel(fileName: String, data: ByteArray) = fileTransfer.uploadToCurrentDirectory(fileName, data)
+    fun downloadFileFromManager(fileName: String) = fileTransfer.downloadFromManager(fileName)
+    fun downloadAttachment(attachment: FileAttachment): StateFlow<DownloadState> = fileTransfer.downloadAttachment(attachment)
+    fun previewImageFile(fileName: String) = fileTransfer.previewImage(fileName)
+    fun closePreview() = fileTransfer.closePreview()
 
     /**
-     * 流式下载到应用缓存目录（Documents/TS6 Droid/...）：边收边写盘，不把整份文件读进内存。
-     * 大文件（几十~几百 MB）也不会 OOM；失败时删掉半成品。
+     * 上传文件到当前频道，并把它作为一条聊天消息发出去。
+     * 文件部分交给控制器，消息部分留在这 —— 两边各自只碰自己那份状态。
      */
-    private suspend fun streamDownloadToCache(
-        client: TsClient,
-        channelId: Long,
-        remotePath: String,
-        host: String,
-        cachePath: String,
-    ): Pair<android.net.Uri, Long>? {
-        // 已有缓存直接用
-        fileCache.getUri(host, cachePath)?.let { return it to -1L }
-
-        val sink = fileCache.openSink(host, cachePath) ?: return null
-        var written = 0L
-        val total = try {
-            client.downloadFileStreaming(channelId, remotePath) { chunk ->
-                sink.output.write(chunk)
-                written += chunk.size
-            }
-        } finally {
-            try { sink.output.close() } catch (_: Exception) {}
-        }
-        if (total == null) {
-            fileCache.abortSink(sink.uri)
-            Log.w(TAG, "streamDownloadToCache failed: $remotePath (已写 $written 字节)")
-            return null
-        }
-        fileCache.commitSink(sink.uri)
-        Log.i(TAG, "streamDownloadToCache ok: $remotePath ($written 字节)")
-        return sink.uri to written
-    }
-
-    /** 把已落盘的缓存文件复制进系统下载目录（流式复制，不占内存） */
-    private suspend fun copyUriToDownloads(fileName: String, src: android.net.Uri): android.net.Uri? =
-        withContext(Dispatchers.IO) {
-            val context = getApplication<Application>()
-            try {
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                    put(MediaStore.Downloads.IS_PENDING, 1)
-                }
-                val dst = context.contentResolver.insert(
-                    MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
-                ) ?: return@withContext null
-                context.contentResolver.openInputStream(src)?.use { input ->
-                    context.contentResolver.openOutputStream(dst)?.use { output ->
-                        input.copyTo(output, bufferSize = 256 * 1024)
-                    }
-                }
-                values.clear()
-                values.put(MediaStore.Downloads.IS_PENDING, 0)
-                context.contentResolver.update(dst, values, null, null)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, context.getString(R.string.file_saved, fileName), Toast.LENGTH_SHORT).show()
-                }
-                dst
-            } catch (e: Exception) {
-                Log.w(TAG, "copyUriToDownloads failed for $fileName", e)
-                null
-            }
-        }
-
-    /** 从已落盘的缓存 Uri 里抽样解码图片（不再需要整份字节） */
-    private fun decodeSampledBitmapFromUri(uri: android.net.Uri, maxDimension: Int): android.graphics.Bitmap? {
-        val resolver = getApplication<Application>().contentResolver
-        return try {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            val width = bounds.outWidth
-            val height = bounds.outHeight
-            var sampleSize = 1
-            if (width > maxDimension || height > maxDimension) {
-                var half = maxOf(width, height) / 2
-                while (half / sampleSize >= maxDimension) sampleSize *= 2
-            }
-            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
-        } catch (e: Exception) {
-            Log.w(TAG, "decodeSampledBitmapFromUri failed", e)
-            null
-        }
-    }
-
-    fun downloadAttachment(attachment: FileAttachment): StateFlow<DownloadState> {
-        val host = serverAddress?.substringBefore(':') ?: "unknown"
-        val cachePath = attachment.fileName.trimStart('/')
-        val cacheKey = "$host/$cachePath"
-
-        // Return existing in-memory result if already loaded
-        downloadCache[cacheKey]?.let { existing ->
-            if (existing.value is DownloadState.Done) return existing
-        }
-
-        val state = MutableStateFlow<DownloadState>(DownloadState.Downloading)
-        val client = tsClient ?: run {
-            state.value = DownloadState.Error("Pas connecté")
-            return state
-        }
-        val channelId = if (attachment.channelId != 0L) attachment.channelId else currentChannelId()
-
-        downloadCache[cacheKey] = state
-
-        viewModelScope.launch(Dispatchers.IO) {
-            // 分块流式下载（边收边落盘），大文件也不进内存
-            val got = streamDownloadToCache(client, channelId, "/${attachment.fileName}", host, cachePath)
-            if (got == null) {
-                downloadCache.remove(cacheKey)
-                state.value = DownloadState.Error("Échec du téléchargement")
-                return@launch
-            }
-            val (localUri, _) = got
-            if (attachment.isImage) {
-                val bmp = decodeSampledBitmapFromUri(localUri, 1280)
-                state.value = DownloadState.Done(bmp?.asImageBitmap(), localUri)
-            } else {
-                val dlUri = copyUriToDownloads(attachment.fileName.substringAfterLast('/'), localUri)
-                state.value = DownloadState.Done(null, dlUri)
-            }
-        }
-        return state
-    }
-
-    private fun decodeSampledBitmap(data: ByteArray, maxDimension: Int): android.graphics.Bitmap? {
-        // First pass: decode only bounds
-        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(data, 0, data.size, options)
-
-        // Calculate sample size (power of 2)
-        val width = options.outWidth
-        val height = options.outHeight
-        var sampleSize = 1
-        if (width > maxDimension || height > maxDimension) {
-            val halfWidth = width / 2
-            val halfHeight = height / 2
-            while (halfWidth / sampleSize >= maxDimension || halfHeight / sampleSize >= maxDimension) {
-                sampleSize *= 2
-            }
-        }
-
-        // Second pass: decode with sample size
-        val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-        return BitmapFactory.decodeByteArray(data, 0, data.size, decodeOptions)
-    }
-
-    fun toggleFileManager() {
-        if (_fileManagerOpen.value) {
-            closeFileManager()
-        } else {
-            _fileManagerOpen.value = true
-            refreshFileList()
-        }
-    }
-
-    fun closeFileManager() {
-        _fileManagerOpen.value = false
-        _currentFilePath.value = "/"
-        _fileList.value = emptyList()
-    }
-
-    fun refreshFileList() {
-        val client = tsClient ?: run { Log.w(TAG, "refreshFileList: tsClient is null"); return }
-        val channelId = currentChannelId()
-        if (channelId == 0L) { Log.w(TAG, "refreshFileList: channelId is 0"); return }
-        Log.d(TAG, "refreshFileList: channelId=$channelId path=${_currentFilePath.value}")
-        _fileManagerLoading.value = true
+    fun uploadAndSendFile(fileName: String, data: ByteArray, isPrivate: Boolean, targetId: Int?) {
+        val ch = currentChannelId()
+        if (ch == 0L) return
         viewModelScope.launch {
-            val files = client.listFiles(channelId, _currentFilePath.value)
-            Log.d(TAG, "refreshFileList: got ${files?.size ?: "null"} files")
-            _fileList.value = files ?: emptyList()
-            _fileManagerLoading.value = false
+            if (!fileTransfer.upload(ch, "/$fileName", data)) return@launch
+            val url = fileTransfer.buildTs3FileUrl(ch, fileName, data.size.toLong())
+            appendFileMessage(fileName, data.size.toLong(), url, isPrivate, targetId)
         }
     }
 
-    fun navigateToFolder(folderName: String) {
-        val current = _currentFilePath.value
-        _currentFilePath.value = if (current.endsWith("/")) "$current$folderName/" else "$current/$folderName/"
-        refreshFileList()
-    }
-
-    fun navigateUp() {
-        val current = _currentFilePath.value.trimEnd('/')
-        if (current == "" || current == "/") return
-        val parent = current.substringBeforeLast('/', "/")
-        _currentFilePath.value = if (parent.endsWith("/")) parent else "$parent/"
-        refreshFileList()
-    }
-
-    fun deleteFileInChannel(name: String) {
-        val client = tsClient ?: return
-        val channelId = currentChannelId()
-        val fullPath = _currentFilePath.value + name
-        client.deleteFile(channelId, fullPath)
-        viewModelScope.launch { delay(500); refreshFileList() }
-    }
-
-    fun renameFileInChannel(oldName: String, newName: String) {
-        val client = tsClient ?: return
-        val channelId = currentChannelId()
-        val currentPath = _currentFilePath.value
-        client.renameFile(channelId, currentPath + oldName, currentPath + newName)
-        viewModelScope.launch { delay(500); refreshFileList() }
-    }
-
-    fun createDirectoryInChannel(dirName: String) {
-        val client = tsClient ?: run { Log.w(TAG, "createDirectory: tsClient is null"); return }
-        val channelId = currentChannelId()
-        if (channelId == 0L) { Log.w(TAG, "createDirectory: channelId is 0"); return }
-        val fullPath = _currentFilePath.value + dirName
-        Log.d(TAG, "createDirectory: channelId=$channelId path=$fullPath")
-        try {
-            client.createDirectory(channelId, fullPath)
-        } catch (e: Exception) {
-            Log.e(TAG, "createDirectory failed", e)
-        }
-        viewModelScope.launch { delay(500); refreshFileList() }
-    }
-
+    /** 分享文件管理器里已有的文件：不重复上传，只把链接发到聊天 */
     fun shareFile(targetUserId: Int?, fileName: String, fileSize: Long) {
-        val channelId = currentChannelId()
-        if (channelId == 0L) return
-        val addr = serverAddress ?: return
-        val host = addr.substringBefore(':')
-        val port = addr.substringAfter(':', "9987")
-        val currentPath = _currentFilePath.value
-        val ts3Url = "ts3file://${host}?port=${port}&channel=${channelId}" +
-            "&path=${currentPath}&filename=${fileName}&isDir=0&size=${fileSize}"
-        val ext = fileName.substringAfterLast('.', "").lowercase()
-        val isImage = ext in setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
-        val attachment = FileAttachment(fileName, fileSize, fileId = "", isImage, channelId = channelId)
-        val meSender = getApplication<Application>().getString(R.string.me_sender)
+        val ch = currentChannelId()
+        if (ch == 0L) return
+        val url = fileTransfer.buildTs3FileUrl(ch, fileName, fileSize, fileTransfer.currentFilePath.value)
+        appendFileMessage(fileName, fileSize, url, targetUserId != null, targetUserId)
+    }
 
-        if (targetUserId != null) {
-            tsClient?.sendPrivateMessage(targetUserId, ts3Url)
-            val msg = ChatMessage(
-                sender = meSender, text = fileName, isMe = true,
-                isPrivate = true, senderId = targetUserId, fileAttachment = attachment,
-            )
+    /** 把"我发了个文件"这条消息插进聊天流并发往服务器（附带落盘）。 */
+    private fun appendFileMessage(
+        fileName: String,
+        fileSize: Long,
+        ts3Url: String,
+        isPrivate: Boolean,
+        targetId: Int?,
+    ) {
+        val meSender = getApplication<Application>().getString(R.string.me_sender)
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        val isImage = ext in IMAGE_EXTENSIONS
+        val attachment = FileAttachment(fileName, fileSize, fileId = "", isImage, channelId = currentChannelId())
+        if (isPrivate && targetId != null) {
+            tsClient?.sendPrivateMessage(targetId, ts3Url)
             val current = _privateMessages.value.toMutableMap()
-            current[targetUserId] = (current[targetUserId] ?: emptyList()) + msg
+            current[targetId] = (current[targetId] ?: emptyList()) +
+                ChatMessage(sender = meSender, text = fileName, isMe = true, isPrivate = true, senderId = targetId, fileAttachment = attachment)
             _privateMessages.value = current
         } else {
             tsClient?.sendChannelMessage(ts3Url)
-            _channelMessages.value = _channelMessages.value + ChatMessage(
-                sender = meSender, text = fileName, isMe = true, fileAttachment = attachment,
-            )
+            _channelMessages.value = _channelMessages.value +
+                ChatMessage(sender = meSender, text = fileName, isMe = true, fileAttachment = attachment)
         }
         scheduleSave()
-    }
-
-    fun downloadFileFromManager(fileName: String) {
-        val client = tsClient ?: return
-        val channelId = currentChannelId()
-        val currentPath = _currentFilePath.value
-        val fullName = currentPath.trimStart('/') + fileName
-        val host = serverAddress?.substringBefore(':') ?: "unknown"
-        val cachePath = fullName.trimStart('/')
-
-        viewModelScope.launch(Dispatchers.IO) {
-            // 文件管理器下载：直接边收边写进系统下载目录（大文件不再先缓存再复制，省一半磁盘）
-            val sink = fileCache.openDownloadsSink(fileName) ?: return@launch
-            var written = 0L
-            val total = try {
-                client.downloadFileStreaming(channelId, "/$fullName") { chunk ->
-                    sink.output.write(chunk)
-                    written += chunk.size
-                }
-            } finally {
-                try { sink.output.close() } catch (_: Exception) {}
-            }
-            if (total == null) {
-                fileCache.abortSink(sink.uri)
-                Log.w(TAG, "文件管理器下载失败: $fullName (已写 $written 字节)")
-                return@launch
-            }
-            fileCache.commitSink(sink.uri)
-            Log.i(TAG, "文件管理器下载完成: $fullName ($written 字节)")
-            withContext(Dispatchers.Main) {
-                Toast.makeText(
-                    getApplication(),
-                    getApplication<Application>().getString(R.string.file_saved, fileName),
-                    Toast.LENGTH_SHORT,
-                ).show()
-                openFileUri(sink.uri, fileName)
-            }
-        }
-    }
-
-    fun previewImageFile(fileName: String) {
-        val client = tsClient ?: return
-        val channelId = currentChannelId()
-        val currentPath = _currentFilePath.value
-        val fullName = currentPath.trimStart('/') + fileName
-        val host = serverAddress?.substringBefore(':') ?: "unknown"
-        val cachePath = fullName.trimStart('/')
-
-        viewModelScope.launch(Dispatchers.IO) {
-            val got = streamDownloadToCache(client, channelId, "/$fullName", host, cachePath)
-                ?: return@launch
-            val bytes = getApplication<Application>().contentResolver
-                .openInputStream(got.first)?.use { it.readBytes() }
-            if (bytes != null) {
-                _previewImageBytes.value = bytes
-                _previewImageName.value = fileName
-            }
-        }
-    }
-
-    fun closePreview() {
-        _previewImageBytes.value = null
-        _previewImageName.value = null
-    }
-
-    private fun openFileUri(uri: android.net.Uri, fileName: String) {
-        val context = getApplication<Application>()
-        try {
-            val ext = fileName.substringAfterLast('.', "").lowercase()
-            val mimeType = android.webkit.MimeTypeMap.getSingleton()
-                .getMimeTypeFromExtension(ext) ?: "*/*"
-            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, mimeType)
-                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-        } catch (_: Exception) {}
-    }
-
-    fun uploadFileToChannel(fileName: String, data: ByteArray) {
-        val client = tsClient ?: return
-        val channelId = currentChannelId()
-        if (channelId == 0L) return
-        val path = _currentFilePath.value + fileName
-        viewModelScope.launch {
-            val success = client.uploadFile(channelId, path, data, overwrite = true)
-            if (success) {
-                delay(500)
-                refreshFileList()
-            }
-        }
     }
 
     fun disconnect() {
