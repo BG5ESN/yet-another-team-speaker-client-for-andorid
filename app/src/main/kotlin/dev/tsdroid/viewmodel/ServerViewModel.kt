@@ -243,6 +243,7 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
             tsClient = service.tsClient
             audioBridge = service.audioBridge
             audioBridge?.setMutedUserIds(_mutedUserIds.value)
+            audioBridge?.gateTransmissionByVoiceActivity = !_isPttMode.value
             connectionService = service
             queriedPermChannels.clear()
 
@@ -507,6 +508,8 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         _isPttMode.value = newPttMode
         // When switching to PTT mode, mute. When switching to VA, unmute.
         audioBridge?.setMuted(newPttMode)
+        // VA 模式：发送要过 VAD 门（静音时不编码不上行）；PTT 模式按住就发，不门控
+        audioBridge?.gateTransmissionByVoiceActivity = !newPttMode
     }
 
     fun toggleOutputMute() {

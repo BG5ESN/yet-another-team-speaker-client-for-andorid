@@ -137,6 +137,17 @@ class AudioBridge(
     /** 本地（自己）麦克风最近一次超门限的时刻 */
     @Volatile private var localAudibleAtMs = 0L
 
+    /**
+     * VA（语音激活）模式下的发送门控：
+     *  · false —— PTT 模式：按住就是要发，不做门控（保持原行为）
+     *  · true  —— VA 模式：静音时不编码、不上行，只有判定"在说话"才发
+     *
+     * 由 ViewModel 按当前模式设置。模式本身的唯一真相在 ViewModel 的 isPttMode，
+     * 这里只接收它的结论，避免同一件事有两处真相。
+     */
+    @Volatile
+    var gateTransmissionByVoiceActivity: Boolean = false
+
     // ── 音频焦点：防止被其他 App（音乐/导航）duck 或抢占 ──
     private var audioFocusRequest: AudioFocusRequest? = null
     private val audioManager by lazy {
@@ -279,11 +290,15 @@ class AudioBridge(
                     val isVoiceActive = nowMs - localAudibleAtMs <= RING_HANGOVER_MS
                     _isLocalVoiceActive.value = isVoiceActive
                     
-                    val pcmBytes = shortsToBytes(buffer)
-                    try {
-                        val encoded = codec.encode(pcmBytes)
-                        tsClient.sendAudio(encoded, CODEC_OPUS_VOICE)
-                    } catch (_: Exception) {}
+                    // VA 模式：判定"没在说话"就整帧跳过 —— 不编码也不上行。
+                    // 麦克风保持采集（要靠它测电平、等下一次开口），只停编码与发送。
+                    if (shouldTransmitFrame(gateTransmissionByVoiceActivity, isVoiceActive)) {
+                        val pcmBytes = shortsToBytes(buffer)
+                        try {
+                            val encoded = codec.encode(pcmBytes)
+                            tsClient.sendAudio(encoded, CODEC_OPUS_VOICE)
+                        } catch (_: Exception) {}
+                    }
                 } else {
                     _isLocalVoiceActive.value = false
                 }
@@ -686,3 +701,14 @@ class AudioBridge(
         }
     }
 }
+
+/**
+ * 这一帧要不要编码发出去。
+ *
+ * · PTT 模式（voiceActivatedMode = false）**永远发** —— 用户按住按键就是明确表达了"要发"，
+ *   这时再拿 VAD 拦他，会出现"我按住说话了却没发出去"的困惑；
+ * · VA 模式只在判定"在说话"时发 —— 静音段不编码不上行：省上行带宽和电量，
+ *   也让服务器不再一直认为你在说话（PC 端那个发送灯会跟着声音闪，而不是常亮）。
+ */
+internal fun shouldTransmitFrame(voiceActivatedMode: Boolean, isVoiceActive: Boolean): Boolean =
+    !voiceActivatedMode || isVoiceActive
