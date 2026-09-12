@@ -90,4 +90,7 @@
     <string name="noise_suppression">Microphone noise suppression</string>
     <string name="ring_threshold">Speaking ring threshold</string>
     <string name="about_internal_note">Internal build · based on the upstream GPLv3 open-source project</string>
+    <string name="mic_test_hold">Hold to test mic</string>
+    <string name="mic_test_speaking">Speaking</string>
+    <string name="mic_test_silent">Silent</string>
 </resources>

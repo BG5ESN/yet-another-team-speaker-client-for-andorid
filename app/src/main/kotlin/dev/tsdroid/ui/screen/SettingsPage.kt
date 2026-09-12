@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,6 +34,24 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import android.Manifest
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.core.content.ContextCompat
+import dev.tsdroid.bridge.audio.dbfsOf
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import coil.compose.AsyncImage
 import dev.tsdroid.data.SettingsStore
 import dev.tsdroid.han.R
@@ -163,6 +182,9 @@ fun SettingsPage(
                         valueRange = -60f..-15f,
                         steps = 44,
                     )
+
+                    // 麦克风 VA 测试：按住测自己的声音落在这把尺子的哪里（顺便验证门控会不会放过你）
+                    MicTestSection(ringDb = ringDb)
                 }
 
                 // 麦克风降噪
@@ -319,3 +341,159 @@ private fun SettingsClickableRow(
         trailing()
     }
 }
+
+/**
+ * 麦克风 VA 测试。
+ *
+ * 按住按钮：用**独立采集通道**测麦克风电平，实时画在下面那条与门限同刻度的电平条上 ——
+ * 电平超过门限的位置就变绿，代表"这一帧会被判为说话"（VA 模式会发出去）。
+ * 松手立即停止采集，不常驻占用麦克风。
+ *
+ * 独立通道的好处：不依赖通话连接，**在设置页就能先把门限调好再连服务器**。
+ * 代价：通话进行中测试会多开一路采集，极端机型上可能影响通话音质 —— 调门限建议先断开连接。
+ */
+@Composable
+private fun MicTestSection(ringDb: Float) {
+    val context = LocalContext.current
+    var holding by remember { mutableStateOf(false) }
+    var levelDb by remember { mutableStateOf(-120.0) }
+
+    LaunchedEffect(holding) {
+        if (!holding) {
+            levelDb = -120.0
+            return@LaunchedEffect
+        }
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            Toast.makeText(context, "需要麦克风权限才能测试", Toast.LENGTH_SHORT).show()
+            holding = false
+            return@LaunchedEffect
+        }
+
+        val minBuf = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        val record = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,   // 与生产采集同一条输入路径
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(minBuf, FRAME_SAMPLES * 2 * 4),
+            )
+        } catch (t: Throwable) {
+            Log.w("MicTest", "创建 AudioRecord 失败", t)
+            null
+        }
+        if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
+            record?.release()
+            Toast.makeText(context, "麦克风不可用", Toast.LENGTH_SHORT).show()
+            holding = false
+            return@LaunchedEffect
+        }
+
+        try {
+            record.startRecording()
+            withContext(Dispatchers.IO) {
+                val buf = ShortArray(FRAME_SAMPLES)
+                var tick = 0
+                while (isActive) {
+                    val read = try {
+                        record.read(buf, 0, FRAME_SAMPLES)
+                    } catch (t: Throwable) {
+                        break
+                    }
+                    // 25Hz 更新足够看清弹跳，不必 50Hz 刷 Compose
+                    if (read > 0 && tick++ % 2 == 0) levelDb = dbfsOf(buf, read)
+                }
+            }
+        } finally {
+            runCatching { record.stop() }
+            record.release()
+            levelDb = -120.0
+        }
+    }
+
+    Spacer(Modifier.height(10.dp))
+
+    // 按住 = 采集，松手 = 停（不写成开关，避免忘了关一直占着麦克风）
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                if (holding) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.surfaceVariant
+            )
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    holding = true
+                    waitForUpOrCancellation()
+                    holding = false
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = stringResource(R.string.mic_test_hold),
+            color = if (holding) MaterialTheme.colorScheme.onPrimary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    Spacer(Modifier.height(8.dp))
+
+    // 电平条：与上面滑块同一个刻度域（-60..-15 dBFS），竖线就是门限
+    val speaking = levelDb > ringDb
+    val levelFrac = ((levelDb + 60.0) / 45.0).coerceIn(0.0, 1.0).toFloat()
+    val thresholdFrac = ((ringDb + 60f) / 45f).coerceIn(0f, 1f)
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+    val onColor = Color(0xFF4CAF50)
+    val idleColor = MaterialTheme.colorScheme.outline
+    val markColor = MaterialTheme.colorScheme.primary
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Canvas(
+            modifier = Modifier
+                .weight(1f)
+                .height(12.dp)
+        ) {
+            val h = size.height
+            drawRoundRect(color = trackColor, cornerRadius = CornerRadius(h / 2))
+            if (levelFrac > 0f) {
+                drawRoundRect(
+                    color = if (speaking) onColor else idleColor,
+                    size = Size(size.width * levelFrac, h),
+                    cornerRadius = CornerRadius(h / 2),
+                )
+            }
+            // 门限刻度线
+            val x = size.width * thresholdFrac
+            drawRect(
+                color = markColor,
+                topLeft = Offset(x.coerceIn(0f, size.width - 2f), 0f),
+                size = Size(2.dp.toPx(), h),
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = if (speaking) stringResource(R.string.mic_test_speaking)
+            else stringResource(R.string.mic_test_silent),
+            style = MaterialTheme.typography.labelMedium,
+            color = if (speaking) onColor else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    Text(
+        text = "${levelDb.toInt()} dBFS",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+private const val SAMPLE_RATE = 48000
+private const val FRAME_SAMPLES = 960

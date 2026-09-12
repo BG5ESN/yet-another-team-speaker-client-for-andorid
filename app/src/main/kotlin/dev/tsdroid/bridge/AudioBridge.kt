@@ -17,6 +17,7 @@ import androidx.core.content.ContextCompat
 import dev.tslib.AudioConfig
 import dev.tslib.OpusCodec
 import dev.tsdroid.bridge.audio.JitterBuffer
+import dev.tsdroid.bridge.audio.dbfsOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -488,18 +489,8 @@ class AudioBridge(
     // 说话圈：按"解码后的真实音频能量"判定谁在说话（dBFS，16bit 满量程 = 0dBFS）
     // ─────────────────────────────────────────────────────────
 
-    /** 一帧 PCM 的电平（dBFS）。全静音返回 -120 */
-    private fun frameDbfs(pcm: ShortArray, samples: Int): Double {
-        if (samples <= 0) return -120.0
-        var sum = 0.0
-        for (i in 0 until samples) {
-            val v = pcm[i].toDouble()
-            sum += v * v
-        }
-        val rms = kotlin.math.sqrt(sum / samples)
-        if (rms <= 1.0) return -120.0
-        return 20.0 * kotlin.math.log10(rms / 32768.0)
-    }
+    /** 一帧 PCM 的电平（dBFS）。实现在 LevelMeter.kt —— 与设置页的麦克风测试共用同一公式 */
+    private fun frameDbfs(pcm: ShortArray, samples: Int): Double = dbfsOf(pcm, samples)
 
     /** 解码出一帧真实 PCM 后记录能量（只有真实帧算，PLC 补出来的帧不算） */
     private fun noteDecodedEnergy(userId: Int, pcm: ShortArray, samples: Int) {

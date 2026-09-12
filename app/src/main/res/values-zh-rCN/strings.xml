@@ -129,4 +129,7 @@
     <string name="about_software">关于软件 / About</string>
     <string name="about_back">← 返回</string>
     <string name="about_internal_note">内部使用版本 · 基于上游 GPLv3 开源项目修改</string>
+    <string name="mic_test_hold">按住测试麦克风</string>
+    <string name="mic_test_speaking">说话中</string>
+    <string name="mic_test_silent">静音</string>
 </resources>

@@ -130,4 +130,7 @@
     <string name="about_software">À propos / About</string>
     <string name="about_back">← Retour</string>
     <string name="about_internal_note">Version interne · dérivée du projet open source GPLv3 en amont</string>
+    <string name="mic_test_hold">Maintenir pour tester le micro</string>
+    <string name="mic_test_speaking">Parle</string>
+    <string name="mic_test_silent">Silence</string>
 </resources>
