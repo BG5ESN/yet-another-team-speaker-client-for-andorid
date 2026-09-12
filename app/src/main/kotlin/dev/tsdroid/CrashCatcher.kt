@@ -102,7 +102,7 @@ object CrashCatcher {
             if (!interesting) continue
 
             val trace = try {
-                info.traceInputStream?.use { String(it.readBytes(), Charsets.UTF_8) } ?: "(无 trace)"
+                info.traceInputStream?.use { readableTrace(it.readBytes()) } ?: "(无 trace)"
             } catch (t: Throwable) {
                 "(读 trace 失败: $t)"
             }
@@ -125,9 +125,83 @@ object CrashCatcher {
         if (reported == 0) Log.i(TAG, "过去 48 小时没有异常退出记录")
     }
 
+    /**
+     * 把 trace 流转成能读的文本。
+     *
+     * 原生崩溃的 trace 是 **protobuf 格式的 tombstone 二进制**，直接 String(bytes, UTF_8) 会
+     * 得到一堆控制字符 —— 报告里那段"人读不了"就是这个原因（实测一份 240KB 的报告里，
+     * trace 段可打印率只有 67%）。
+     *
+     * 好消息是 protobuf 把字符串嵌在错误位置而已，内容都在：按顺序抽出长度 >= 4 的可读 ASCII
+     * 片段，SIGABRT/SI_QUEUE、backtrace 的函数名、库路径、构建哈希都能捞回来。
+     * 文本型 trace（ANR 等）则原样返回，不做加工。
+     */
+    internal fun readableTrace(raw: ByteArray): String {
+        val head = raw.take(4096)
+        val printable = head.count { isPrintableAscii(it) }
+        val ratio = if (head.isEmpty()) 1.0 else printable.toDouble() / head.size
+        if (ratio >= 0.9) return String(raw, Charsets.UTF_8)
+
+        val sb = StringBuilder()
+        sb.append("(原始 trace 是二进制：原生崩溃的 protobuf tombstone，共 ")
+            .append(raw.size).append(" 字节)\n")
+        sb.append("(下面按出现顺序抽取其中的可读片段 —— 信号、backtrace 函数名、库路径都在里面)\n\n")
+        var run = StringBuilder()
+        fun flush() {
+            if (run.length >= 4) sb.append(run).append('\n')
+            run = StringBuilder()
+        }
+        for (b in raw) {
+            val v = b.toInt() and 0xFF
+            if (v in 32..126) run.append(v.toChar()) else flush()
+        }
+        flush()
+        return sb.toString()
+    }
+
+    /** Byte 必须先转无符号 Int 再比：Kotlin 的 Byte 是有符号的，0x80 以上直接 toInt() 会变负数 */
+    private fun isPrintableAscii(b: Byte): Boolean {
+        val v = b.toInt() and 0xFF
+        return v in 32..126 || v == 9 || v == 10 || v == 13
+    }
+
+    /** 下载目录别攒成无底洞：只保留最近 keep 份 ts3-crash-*（删别人的会抛异常，忽略即可） */
+    private fun pruneDownloads(context: Context, keep: Int = 10) {
+        try {
+            val coll = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            val cursor = context.contentResolver.query(
+                coll,
+                arrayOf(MediaStore.Downloads._ID),
+                "${MediaStore.Downloads.DISPLAY_NAME} LIKE ?",
+                arrayOf("ts3-crash-%"),
+                "${MediaStore.Downloads.DATE_ADDED} DESC",
+            ) ?: return
+            cursor.use { c ->
+                var n = 0
+                while (c.moveToNext()) {
+                    n++
+                    if (n <= keep) continue
+                    val id = c.getLong(0)
+                    try {
+                        context.contentResolver.delete(
+                            android.content.ContentUris.withAppendedId(coll, id), null, null,
+                        )
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "pruneDownloads 失败", t)
+        }
+    }
+
     /** 写报告：下载根目录（最新一份 + 带时间的）+ 私有目录 + logcat。返回可分享的 Uri */
     private fun write(context: Context, kind: String, body: String): Uri? {
-        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        // 毫秒必须带上：崩溃可能是**连着的几条**（一次启动批量报告多次退出），以前秒级戳
+        // 会让它们撞进同一个名字，而 MediaStore 对同名 insert 不覆盖、只自动改名，
+        // 于是下载目录攒出 "xxx.txt / xxx (1).txt / xxx (2).txt"。实测一晚 4 次 native 崩溃
+        // 就是这样变成 4 份的。
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmssSSS", Locale.US).format(Date())
         val text = buildString {
             append("===== TS3 崩溃报告 =====\n")
             append("kind=").append(kind).append("  记录时间=").append(stamp).append('\n')
@@ -163,31 +237,31 @@ object CrashCatcher {
         var shareUri: Uri? = null
         try {
             shareUri = putDownloads(context, "ts3-crash-$kind-$stamp.txt", text)
-            putDownloads(context, LATEST_NAME, text, replace = true)
+            putDownloads(context, LATEST_NAME, text)
+            pruneDownloads(context)          // 下载目录不是无底洞：只留最近 10 份
         } catch (t: Throwable) {
             Log.w(TAG, "写下载目录失败", t)
         }
         return shareUri
     }
 
-    /** 往系统「下载」写一个 txt；replace=true 时先删掉同名的旧文件（免得攒成 xxx (1).txt） */
+    /** 往系统「下载」写一个 txt。同名先删：MediaStore 的 insert 不会覆盖，只会改名成 "name (1).txt" */
     private fun putDownloads(
         context: Context,
         name: String,
         text: String,
-        replace: Boolean = false,
     ): Uri? {
         val coll = MediaStore.Downloads.EXTERNAL_CONTENT_URI
         val rel = Environment.DIRECTORY_DOWNLOADS
-        if (replace) {
-            try {
-                context.contentResolver.delete(
-                    coll,
-                    "${MediaStore.Downloads.DISPLAY_NAME}=? AND ${MediaStore.Downloads.RELATIVE_PATH}=?",
-                    arrayOf(name, "$rel/"),
-                )
-            } catch (_: Throwable) {
-            }
+        // 只用 DISPLAY_NAME 匹配删除：RELATIVE_PATH 的写法各 ROM 不完全一致（"Download/" vs
+        // "Download"），带上它反而可能一条都删不掉，那 insert 就会改名，越攒越多。
+        try {
+            context.contentResolver.delete(
+                coll,
+                "${MediaStore.Downloads.DISPLAY_NAME}=?",
+                arrayOf(name),
+            )
+        } catch (_: Throwable) {
         }
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
