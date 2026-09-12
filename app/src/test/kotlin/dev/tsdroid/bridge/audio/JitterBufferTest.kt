@@ -1,6 +1,7 @@
 package dev.tsdroid.bridge.audio
 
 import dev.tsdroid.bridge.audio.JitterBuffer.Companion.JB_IDLE_RESET_MS
+import dev.tsdroid.bridge.audio.JitterBuffer.Companion.JB_MAX_TARGET_SLOTS
 import dev.tsdroid.bridge.audio.JitterBuffer.Companion.JB_SHRINK_IDLE_MS
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -140,24 +141,26 @@ class JitterBufferTest {
         assertEquals("屯够目标深度后出声", 500, sample(jb.produceTick(t2 + 20)))
     }
 
-    // ── 7) 自适应升档：一秒内补帧多，说明等得不够 → 目标深度 +1 ──
+    // ── 7) 自适应升档：只有**真的判丢**才加深（补帧不算，见用例 10 的反例）──
     @Test
-    fun depthRisesWhenManyPlcFramesInOneSecond() {
+    fun depthRisesWhenPacketsAreActuallyDropped() {
         val jb = jb()
-        val t = T0
-        jb.submit(0, pkt(0), t)
-        assertEquals(0, sample(jb.produceTick(t)))     // 真实帧 → nextExpected = 1
+        val t0 = T0
+        jb.submit(0, pkt(0), t0)
+        assertEquals(0, sample(jb.produceTick(t0)))    // 建立 nextExpected
 
-        // 缓冲里只放包 3（gap=2，在等待窗口内，不触发重同步）→ 期望的 1 一直缺 → 持续 PLC。
-        // 关键是让 pending 非空：一旦 pending 空且静默 >250ms，就会自动 reset，
-        // reset 后 nextExpected=-1，produceTick 直接返回，adapt 从此不再执行（深度也就不会自适应）。
-        jb.submit(3, pkt(3), t + 20)
-        var t2 = t + 20
-        repeat(70) {
-            jb.produceTick(t2)
-            t2 += 20
+        // 每 10 拍里有 2 拍没有包到达 → 缺口跨过等待窗口 → 判丢
+        var nextId = 1
+        var t = t0 + 20
+        repeat(600) { tick ->
+            if (tick % 10 >= 2) {
+                jb.submit(nextId, pkt(nextId), t)
+                nextId++
+            }
+            jb.produceTick(t)
+            t += 20
         }
-        assertTrue("补帧多应升档（plc=${jb.plcCount}, targetSlots=${jb.targetSlots()}）",
+        assertTrue("真丢包时应升档（lost=${jb.lostCount}, targetSlots=${jb.targetSlots()}）",
             jb.targetSlots() >= 2)
     }
 
@@ -166,12 +169,16 @@ class JitterBufferTest {
     fun depthFallsWhenLineIsClean() {
         val jb = jb()
         val t = T0
-        // 先升档（同用例 7：靠持续 PLC 把每秒补帧数顶上去）
+        // 先升档（同用例 7：靠真判丢）
         jb.submit(0, pkt(0), t)
         jb.produceTick(t)
-        jb.submit(3, pkt(3), t + 20)
+        var riseId = 1
         var tRise = t + 20
-        repeat(70) {
+        repeat(600) { tick ->
+            if (tick % 10 >= 2) {
+                jb.submit(riseId, pkt(riseId), tRise)
+                riseId++
+            }
             jb.produceTick(tRise)
             tRise += 20
         }
@@ -195,8 +202,10 @@ class JitterBufferTest {
         }
         assertEquals("干净连号流不该产生任何补帧", plcBefore, jb.plcCount)
         assertTrue("干净流应基本每拍都出帧（实际 $realFrames/750）", realFrames >= 740)
-        assertEquals("线路持续干净应一路回落到下限（起于 $risen，jit=${jb.jitterMs()}ms）",
-            1, jb.targetSlots())
+        // 回落目标是"抖动下限"而不是 1：jitterFloor = ceil(jit/20) + 1，
+        // 只要还有一丝抖动估计（jit 衰减到极小但不为零），ceil 就至少给 1 档，再加 1 档余量 = 2 档(40ms)。
+        assertEquals("线路持续干净应回落到抖动下限 2 档(40ms)（起于 $risen，jit=${jb.jitterMs()}）",
+            2, jb.targetSlots())
     }
 
     // ── 9) 边界：最后一个包播完后 pending 为空，不得抛异常 ──
@@ -212,6 +221,44 @@ class JitterBufferTest {
             jb.produceTick(t + 20L * (i + 1))
         }
         assertTrue("pending 空时也不该把丢包数算爆", jb.lostCount < 10L)
+    }
+
+    // ── 10) 真机现象的复现：包只是"到得不准点"，一个都没丢 ──
+    // 真机日志里 jb 恒定顶在上限 8x20ms（160ms），而 lost=0/s、dup=0/s。
+    // 说明把深度顶上天的不是丢包，而是"晚到半拍"引发的补帧。
+    @Test
+    fun jitterWithoutPacketLossMustNotPushDepthToCeiling() {
+        val jb = jb()
+        val rnd = java.util.Random(20260912L)      // 固定种子：完全可复现
+
+        // 关键：消费由音频时钟驱动（每 20ms 必须出一帧），包由网络驱动 —— 包晚一拍就立刻缺帧。
+        // 用"每 6 拍里有 1 拍的包晚到一拍"来模拟：包号严格连续（一个都没丢），只是晚到。
+        // （注意不能往缓冲里"批量补交"——那会形成积压，把抖动吸收掉，反而复现不出来。）
+        val ARRIVE_LATE_EVERY = 6
+
+        var nextId = 0
+        repeat(3000) { tick ->
+            val t = T0 + tick * 20L
+            // 不是"晚到的那一拍"就正常提交当前包；晚到的那一拍什么都不提交（包还在路上）
+            if (tick % ARRIVE_LATE_EVERY != 3 && nextId < 3000) {
+                jb.submit(nextId, pkt(nextId), t)
+                nextId++
+            }
+            jb.produceTick(t)
+        }
+        println(
+            "[diag] 60 秒抖动流(不丢包): depth=${jb.targetSlots()} plc=${jb.plcCount} " +
+                "plc/s=${"%.1f".format(jb.plcCount / 60.0)} lost=${jb.lostCount} " +
+                "resync=${jb.resyncCount} jit=${jb.jitterMs().toInt()}ms 已提交=$nextId"
+        )
+
+        assertTrue(
+            "抖动但不丢包时，深度不该被顶到上限 —— " +
+                "实际 ${jb.targetSlots()} 档(${jb.targetSlots() * 20}ms)，" +
+                "plc=${jb.plcCount} lost=${jb.lostCount} resync=${jb.resyncCount} " +
+                "jit=${jb.jitterMs().toInt()}ms",
+            jb.targetSlots() < JB_MAX_TARGET_SLOTS,
+        )
     }
 
     private companion object {

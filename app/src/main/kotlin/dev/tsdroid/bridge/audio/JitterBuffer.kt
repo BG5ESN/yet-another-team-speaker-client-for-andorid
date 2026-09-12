@@ -27,8 +27,12 @@ internal class JitterBuffer(
         const val JB_MIN_WAIT_TICKS = 1
         /** 目标深度下限（20ms） */
         const val JB_MIN_TARGET_SLOTS = 1
-        /** 目标深度上限（160ms） */
-        const val JB_MAX_TARGET_SLOTS = 8
+        /**
+         * 目标深度上限（12 档 = 240ms）。
+         * 升档判据改成"判丢"之后这个上端只留给真丢包用（抖动由 jitterFloor 兜底，最高 6 档）；
+         * 移动网络上丢包/迟延是常态，160ms 余量偏紧，放宽到 240ms。
+         */
+        const val JB_MAX_TARGET_SLOTS = 12
         /** 预填充最多等这么久，避免稀疏流开不出声 */
         const val JB_PREFILL_TIMEOUT_MS = 150L
         /** 每秒统计一次 */
@@ -39,6 +43,11 @@ internal class JitterBuffer(
         const val JB_MAX_PENDING = 32
         /** 抖动估计上限（别让停顿把深度顶满） */
         const val JB_JITTER_MAX_MS = 100.0
+        /**
+         * 升档门槛：每秒**判丢**多少次才认为"缓冲确实不够深"。
+         * 注意必须用判丢（lostCount）而不是补帧（plcCount）—— 见 adapt() 里的说明。
+         */
+        const val JB_RISE_LOST_PER_SEC = 2
         /** 静默这么久就重置（下一段说话重新起播） */
         const val JB_IDLE_RESET_MS = 250L
     }
@@ -63,6 +72,7 @@ internal class JitterBuffer(
     private var lastAdaptMs = 0L
     private var lastShrinkMs = 0L
     private var lastAdaptPlc = 0L
+    private var lastAdaptLost = 0L
 
     /** 最近一次收到包的时刻（诊断用） */
     @Volatile var lastRecvMs = 0L
@@ -146,27 +156,41 @@ internal class JitterBuffer(
         }
     }
 
-    /** 每秒一次的深度自适应：抖动测量兜底 + 补帧快升 / 长时间干净才慢降 */
+    /**
+     * 每秒一次的深度自适应。
+     *
+     * 升档判据用的是**判丢**（lostCount）而不是补帧（plcCount），这一点是实测踩出来的：
+     * plcCount 里绝大多数是"等待窗口内的正常补帧"——包只是晚到半拍，一个都没丢。
+     * 拿它当"线路不好"的证据会形成正反馈：
+     *   包晚到一拍 → 补帧 → 判定线路差 → 加深 → 等待窗口更宽 → 更不容易判丢
+     *   → lost 恒为 0 → 降档条件（要求本周期零异常）永不满足 → 深度只升不降，顶到上限锁死。
+     * 实测（60 秒纯抖动、零丢包）会稳定爬满 8 档/160ms，真机日志里 jb 也正是恒定 8x20ms。
+     *
+     * 判丢才是"缓冲确实不够深"的直接证据；而"抖动该配多深"已经由下面的 jitterFloor
+     * 独立兜底（按实测抖动估算），不需要补帧计数再插一脚。
+     */
     private fun adapt(now: Long) {
         if (now - lastAdaptMs < JB_ADAPT_INTERVAL_MS) return
         lastAdaptMs = now
-        val plcDelta = (plcCount - lastAdaptPlc).toInt()
+        val lostDelta = (lostCount - lastAdaptLost).toInt()
+        lastAdaptLost = lostCount
+        val plcDelta = (plcCount - lastAdaptPlc).toInt()   // 仅用于日志
         lastAdaptPlc = plcCount
         // 实测抖动（到达间隔偏离 20ms 的量）直接映射成"最低深度"：
         // jit≈20ms → 2 档 + 1 档余量 = 3 档(60ms)。这样不靠"丢了才反应"，而是提前托住。
         val jitterFloor = (kotlin.math.ceil(jitterEwmaMs / FRAME_SIZE_MS).toInt() + 1)
             .coerceIn(JB_MIN_TARGET_SLOTS, JB_MAX_TARGET_SLOTS)
-        if (plcDelta >= 3) {
-            // 快升：这一秒补了 3 帧以上，说明还是等不够
+        if (lostDelta >= JB_RISE_LOST_PER_SEC) {
+            // 快升：这一秒真的判丢了，说明缓冲确实不够深
             if (targetSlots < JB_MAX_TARGET_SLOTS) {
                 targetSlots++
-                log("JB(user=$userId) 补帧多(plc=${plcDelta}/s, jit=${jitterEwmaMs.toInt()}ms) → 目标深度 ${targetSlots} 时隙(${targetSlots * 20}ms)")
+                log("JB(user=$userId) 判丢多(lost=${lostDelta}/s, plc=${plcDelta}/s, jit=${jitterEwmaMs.toInt()}ms) → 目标深度 ${targetSlots} 时隙(${targetSlots * 20}ms)")
             }
             lastShrinkMs = now
-        } else if (plcDelta == 0 && targetSlots > jitterFloor && now - lastShrinkMs >= JB_SHRINK_IDLE_MS) {
-            // 慢降：干净满 JB_SHRINK_IDLE_MS 且仍高于抖动下限，才回落一档
+        } else if (lostDelta == 0 && targetSlots > jitterFloor && now - lastShrinkMs >= JB_SHRINK_IDLE_MS) {
+            // 慢降：这一秒既没判丢、又干净满 JB_SHRINK_IDLE_MS，才回落一档
             targetSlots--
-            log("JB(user=$userId) 线路干净 → 目标深度 ${targetSlots} 时隙(${targetSlots * 20}ms)")
+            log("JB(user=$userId) 线路干净(lost=0, plc=${plcDelta}/s) → 目标深度 ${targetSlots} 时隙(${targetSlots * 20}ms)")
             lastShrinkMs = now
         }
         if (targetSlots < jitterFloor) {
