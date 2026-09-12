@@ -78,8 +78,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -186,7 +188,61 @@ fun ServerScreen(
 
     val totalUnread = unreadChannel + totalUnreadPrivate
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    // ── PTT 全屏触摸 ──────────────────────────────────────────────
+    // 条件：PTT 模式 且 已连上服务器（未连接时没有意义，也别白白亮屏）。
+    val pttFullScreenEnabled = isPttMode && connectionState == ConnectionState.CONNECTED
+
+    // ① 这个状态下不让屏幕熄灭。用 LocalView.keepScreenOn 而不是 WindowManager.addFlags：
+    //    跟着 Composable 的生命周期走，离开这个界面/条件不满足时自动清掉，不会漏。
+    val view = LocalView.current
+    DisposableEffect(pttFullScreenEnabled) {
+        view.keepScreenOn = pttFullScreenEnabled
+        onDispose { view.keepScreenOn = false }
+    }
+
+    // ② 双指按下 → 全屏 PTT。mask 的生命周期就是手指按住的时长：
+    //    双指在屏幕任意位置按下即开始说话，手指全部抬起即停止并撤掉 mask（不常驻）。
+    var fullScreenPtt by remember { mutableStateOf(false) }
+
+    // 条件中途不成立（退到 VA 模式 / 断开）时，别把 mask 和 PTT 状态留在半路
+    LaunchedEffect(pttFullScreenEnabled) {
+        if (!pttFullScreenEnabled && fullScreenPtt) {
+            fullScreenPtt = false
+            viewModel.setPushToTalk(false)
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .then(
+                if (!pttFullScreenEnabled) Modifier
+                else Modifier.pointerInput(Unit) {
+                    // 用 Initial 这一趟：事件从外往里走，父容器先看到，
+                    // 这样即使手指落在列表/按钮上也照样能触发（子组件还没消费）。
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val downCount = event.changes.count { it.pressed }
+                            if (!fullScreenPtt && downCount >= 2) {
+                                fullScreenPtt = true
+                                viewModel.setPushToTalk(true)
+                            }
+                            // mask 显示期间把事件全部吃掉：否则手指底下压着的按钮/列表
+                            // 还会照常响应（比如正巧按在"文件管理"图标上就把它点开了）。
+                            if (fullScreenPtt || downCount == 0) {
+                                event.changes.forEach { it.consume() }
+                            }
+                            if (fullScreenPtt && downCount == 0) {
+                                // 全部抬起才退出：两根手指抬起有先后，按"任一抬起"会误退
+                                fullScreenPtt = false
+                                viewModel.setPushToTalk(false)
+                            }
+                        }
+                    }
+                }
+            )
+    ) {
         Scaffold(
             containerColor = Color.Transparent,
         topBar = {
@@ -475,7 +531,38 @@ fun ServerScreen(
                 }
             }
         }
-    }
+        }
+        // 全屏 PTT mask：吃掉触摸，别让底下的列表跟着滚
+        if (fullScreenPtt) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.7f))
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() }
+                            }
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.Mic,
+                        contentDescription = null,
+                        modifier = Modifier.size(96.dp),
+                        tint = Color.White,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = stringResource(R.string.ptt),
+                        color = Color.White,
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                }
+            }
+        }
     }
 }
 
