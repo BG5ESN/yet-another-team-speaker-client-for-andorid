@@ -17,6 +17,7 @@ import androidx.core.content.ContextCompat
 import dev.tslib.AudioConfig
 import dev.tslib.OpusCodec
 import dev.tsdroid.bridge.audio.JitterBuffer
+import dev.tsdroid.bridge.audio.VOICE_HANGOVER_MS
 import dev.tsdroid.bridge.audio.dbfsOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,7 +53,7 @@ class AudioBridge(
         private const val PLAYBACK_TARGET_FRAMES = 3
         // ── 说话圈（判据 = 解码后真实音频能量，不是"收到包"）──
         private const val RING_THRESHOLD_DB_DEFAULT = -40.0  // 门限默认 -40 dBFS
-        private const val RING_HANGOVER_MS = 250L            // 静音这么久才灭圈（防逐字闪）
+        private const val RING_HANGOVER_MS = VOICE_HANGOVER_MS  // 静音这么久才灭圈（防逐字闪）；值与门控保持时间同源
         private const val RING_PUBLISH_MIN_MS = 40L          // 状态最多 25Hz 推一次
         const val RING_THRESHOLD_DB_MIN = -60.0
         const val RING_THRESHOLD_DB_MAX = -15.0

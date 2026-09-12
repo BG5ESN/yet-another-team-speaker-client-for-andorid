@@ -48,6 +48,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.core.content.ContextCompat
+import dev.tsdroid.bridge.audio.VOICE_HANGOVER_MS
 import dev.tsdroid.bridge.audio.dbfsOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
@@ -357,10 +358,16 @@ private fun MicTestSection(ringDb: Float) {
     val context = LocalContext.current
     var holding by remember { mutableStateOf(false) }
     var levelDb by remember { mutableStateOf(-120.0) }
+    var speaking by remember { mutableStateOf(false) }
+    var lastAboveMs by remember { mutableStateOf(0L) }
+    // 采集循环里要读最新的门限值 —— 拖滑块改门限时不能重启采集
+    val currentRingDb by rememberUpdatedState(ringDb)
 
     LaunchedEffect(holding) {
         if (!holding) {
             levelDb = -120.0
+            speaking = false
+            lastAboveMs = 0L
             return@LaunchedEffect
         }
         val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -406,50 +413,31 @@ private fun MicTestSection(ringDb: Float) {
                     } catch (t: Throwable) {
                         break
                     }
-                    // 25Hz 更新足够看清弹跳，不必 50Hz 刷 Compose
-                    if (read > 0 && tick++ % 2 == 0) levelDb = dbfsOf(buf, read)
+                    if (read > 0) {
+                        val db = dbfsOf(buf, read)
+                        val nowMs = System.currentTimeMillis()
+                        if (db > currentRingDb) lastAboveMs = nowMs
+                        // 与生产门控**同一条规则**：超门限后保持 VOICE_HANGOVER_MS 才算"在说话"
+                        val active = nowMs - lastAboveMs <= VOICE_HANGOVER_MS
+                        // 25Hz 刷 UI（每 2 帧一次），别 50Hz 刷 Compose
+                        if (tick++ % 2 == 0) {
+                            levelDb = db
+                            speaking = active
+                        }
+                    }
                 }
             }
         } finally {
             runCatching { record.stop() }
             record.release()
             levelDb = -120.0
+            speaking = false
         }
     }
 
     Spacer(Modifier.height(10.dp))
 
-    // 按住 = 采集，松手 = 停（不写成开关，避免忘了关一直占着麦克风）
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(44.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(
-                if (holding) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.surfaceVariant
-            )
-            .pointerInput(Unit) {
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    holding = true
-                    waitForUpOrCancellation()
-                    holding = false
-                }
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = stringResource(R.string.mic_test_hold),
-            color = if (holding) MaterialTheme.colorScheme.onPrimary
-            else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-
-    Spacer(Modifier.height(8.dp))
-
-    // 电平条：与上面滑块同一个刻度域（-60..-15 dBFS），竖线就是门限
-    val speaking = levelDb > ringDb
+    // ① 电平条放**上面**：按住下面的按钮时，手指挡不到读数
     val levelFrac = ((levelDb + 60.0) / 45.0).coerceIn(0.0, 1.0).toFloat()
     val thresholdFrac = ((ringDb + 60f) / 45f).coerceIn(0f, 1f)
     val trackColor = MaterialTheme.colorScheme.surfaceVariant
@@ -493,6 +481,35 @@ private fun MicTestSection(ringDb: Float) {
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+
+    Spacer(Modifier.height(10.dp))
+
+    // ② 按钮放**最下面**（按住时手在下面，不挡上面的电平条）
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                if (holding) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.surfaceVariant
+            )
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    holding = true
+                    waitForUpOrCancellation()
+                    holding = false
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = stringResource(R.string.mic_test_hold),
+            color = if (holding) MaterialTheme.colorScheme.onPrimary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 private const val SAMPLE_RATE = 48000
