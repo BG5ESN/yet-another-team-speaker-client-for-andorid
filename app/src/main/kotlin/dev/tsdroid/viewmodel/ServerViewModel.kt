@@ -71,6 +71,9 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
     val talkingUserIds: StateFlow<Set<Int>> = _talkingUserIds.asStateFlow()
     
     // Track local mic state for local user talking highlight
+    // ⚠️ 这个镜像**不能**删掉改用 isLocalVoiceActive：init{} 里那个 combine 在 ViewModel
+    //    构造时就求值参数，那时 audioBridge 还是 null，换成 getter 会永久绑到 idle 流上，
+    //    说话圈再也不亮。镜像的作用是给 combine 一个"构造时就存在、之后还能更新"的流。
     private val _isLocalTalking = MutableStateFlow(false)
 
     private val _mutedUserIds = MutableStateFlow<Set<Int>>(emptySet())
@@ -102,7 +105,16 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
     private val _isOutputMuted = MutableStateFlow(false)
     val isOutputMuted: StateFlow<Boolean> = _isOutputMuted.asStateFlow()
 
-    val isLocalVoiceActive: StateFlow<Boolean> get() = audioBridge?.isLocalVoiceActive ?: MutableStateFlow(false)
+    /**
+     * 未绑定服务时的回落流。**必须是同一个实例**：
+     * 写成 `?: MutableStateFlow(false)` 会每次读都新建一个对象 —— Compose 每次重组
+     * 都拿到不同的 StateFlow，于是不停取消旧收集、开新收集、再重组，空转。
+     * 悬浮窗在"未连接/已断开"时会一直走这条回落路径，等于持续空转。
+     */
+    private val idleVoiceActive = MutableStateFlow(false)
+
+    /** 本地是否在说话（源头是 AudioBridge，未绑定时回落到 idleVoiceActive）。 */
+    val isLocalVoiceActive: StateFlow<Boolean> get() = audioBridge?.isLocalVoiceActive ?: idleVoiceActive
 
     private val _connectionState = MutableStateFlow(ConnectionState.CONNECTED)
     val connectionState: StateFlow<Int> = _connectionState.asStateFlow()
