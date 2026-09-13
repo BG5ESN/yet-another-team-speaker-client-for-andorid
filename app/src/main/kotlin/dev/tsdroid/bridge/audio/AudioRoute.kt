@@ -6,7 +6,6 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -67,25 +66,6 @@ class AudioRouteManager(private val context: Context) {
     }
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    /**
-     * 是否走通信策略。
-     *
-     *  · false（默认）—— **媒体策略**：设备列表取自 GET_DEVICES_OUTPUTS（含 A2DP），
-     *    路由用 [AudioTrack.setPreferredDevice]。音质好，但我们的流和音乐同属
-     *    STRATEGY_MEDIA、混在同一条 mixer thread 上 —— 改这条 thread 的设备，
-     *    音乐也跟着换（一条 mixer thread 同一时刻只能对一个物理设备）。
-     *
-     *  · true —— **通信策略**：设备列表取自 getAvailableCommunicationDevices()（仅
-     *    SCO / 听筒 / 扬声器 / 有线，**没有 A2DP**），路由用 [AudioManager.setCommunicationDevice]。
-     *    STRATEGY_PHONE 有独立的 output thread，切它不会碰音乐；音量键也改控通话音量。
-     *    代价是音质（窄带 + 系统 AEC 生效），且要求音频模式为 MODE_IN_COMMUNICATION。
-     */
-    @Volatile
-    var communicationChannel: Boolean = false
-
-    private fun supportsCommunicationApi(): Boolean =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-
     private val _devices = MutableStateFlow<List<AudioRouteDevice>>(emptyList())
     /** 当前可选的输出设备（插拔 / 蓝牙连断时实时刷新） */
     val devices: StateFlow<List<AudioRouteDevice>> = _devices.asStateFlow()
@@ -129,21 +109,14 @@ class AudioRouteManager(private val context: Context) {
      */
     fun refresh() {
         val list = try {
-            if (communicationChannel && supportsCommunicationApi()) {
-                // 通信策略的候选：系统已经替我们筛过了（只有 SCO / 听筒 / 扬声器 / 有线）
-                audioManager.availableCommunicationDevices
-                    .map { toRouteDevice(it) }
-                    .distinctBy { it.id }
-            } else {
-                audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                    .filter {
-                        it.isSink &&
-                            it.type != AudioDeviceInfo.TYPE_TELEPHONY &&
-                            it.type != AudioDeviceInfo.TYPE_FM
-                    }
-                    .map { toRouteDevice(it) }
-                    .distinctBy { it.id }
-            }
+            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .filter {
+                    it.isSink &&
+                        it.type != AudioDeviceInfo.TYPE_TELEPHONY &&
+                        it.type != AudioDeviceInfo.TYPE_FM
+                }
+                .map { AudioRouteDevice(it.id, it.productName?.toString().orEmpty(), it.type) }
+                .distinctBy { it.id }
         } catch (e: Exception) {
             Log.w(TAG, "枚举输出设备失败", e)
             emptyList()
@@ -200,11 +173,7 @@ class AudioRouteManager(private val context: Context) {
         val id = _selectedId.value
         if (id == FOLLOW_SYSTEM) return null
         return try {
-            val sinks = if (communicationChannel && supportsCommunicationApi()) {
-                audioManager.availableCommunicationDevices
-            } else {
-                audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter { it.isSink }
-            }
+            val sinks = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter { it.isSink }
             sinks.firstOrNull { it.id == id }
                 ?: sinks.firstOrNull {
                     it.type == savedType && it.productName?.toString().orEmpty() == savedName
@@ -217,12 +186,6 @@ class AudioRouteManager(private val context: Context) {
 
     /** 把偏好应用到播放轨道。返回系统是否采纳（false = 跟随系统 / 被拒） */
     fun applyTo(track: AudioTrack?): Boolean {
-        // 通信策略下不碰 track：路由由 AudioManager.setCommunicationDevice 统一决定，
-        // 好处正是它落在独立的 output thread 上，不会像 setPreferredDevice 那样
-        // 连带把同一条 mixer thread 上的音乐一起换设备。
-        if (communicationChannel && supportsCommunicationApi()) {
-            return applyCommunicationDevice()
-        }
         val t = track ?: return false
         return try {
             val dev = currentDevice()
@@ -291,33 +254,6 @@ class AudioRouteManager(private val context: Context) {
             false
         }
     }
-
-    /**
-     * 走通信策略设路由。需要音频模式为 MODE_IN_COMMUNICATION，否则系统会抛
-     * IllegalStateException（调用方 AudioBridge 会在切通道时先设好模式）。
-     */
-    private fun applyCommunicationDevice(): Boolean {
-        return try {
-            val dev = currentDevice()
-            val ok = if (dev == null) {
-                audioManager.clearCommunicationDevice()
-                true
-            } else {
-                audioManager.setCommunicationDevice(dev)
-            }
-            Log.i(TAG, "通话路由: 目标=${dev?.let { nameOf(it) } ?: "跟随系统"} 采纳=$ok")
-            ok
-        } catch (e: IllegalStateException) {
-            Log.w(TAG, "setCommunicationDevice 失败（音频模式不是通信模式？）", e)
-            false
-        } catch (e: Exception) {
-            Log.w(TAG, "setCommunicationDevice 异常", e)
-            false
-        }
-    }
-
-    private fun toRouteDevice(it: AudioDeviceInfo) =
-        AudioRouteDevice(it.id, it.productName?.toString().orEmpty(), it.type)
 
     private fun nameOf(d: AudioDeviceInfo): String {
         val p = d.productName?.toString().orEmpty()

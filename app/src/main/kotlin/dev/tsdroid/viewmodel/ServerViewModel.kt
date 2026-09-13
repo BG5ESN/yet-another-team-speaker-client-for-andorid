@@ -138,10 +138,6 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
     private val _unreadPrivate = MutableStateFlow<Map<Int, Int>>(emptyMap())
     val unreadPrivate: StateFlow<Map<Int, Int>> = _unreadPrivate.asStateFlow()
 
-    /** 输出通道：false = 媒体策略（默认），true = 通信策略 */
-    val useCommunicationChannel: StateFlow<Boolean> = settingsStore.useCommunicationChannel
-        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
-
     /** 通话是否独占声音（false = 和音乐并存）*/
     val exclusiveAudio: StateFlow<Boolean> = settingsStore.exclusiveAudio
         .stateIn(viewModelScope, SharingStarted.Eagerly, true)
@@ -254,7 +250,6 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
             // initialize() 在 service 里比这里先跑，已经把焦点抢了 —— 这里同步开关，
             // 若存的是"并存"，setter 会顺带把手里的焦点放掉
             audioBridge?.exclusiveAudio = settingsStore.exclusiveAudio.first()
-            audioBridge?.useCommunicationChannel = settingsStore.useCommunicationChannel.first()
             connectionService = service
             queriedPermChannels.clear()
 
@@ -557,17 +552,6 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
      * 通话独占声音开关。
      * 开：抢焦点，音乐被暂停（原有行为）；关：不抢，两者并存。
      */
-    /**
-     * 切换输出通道。
-     * 开：通信策略（STRATEGY_PHONE）—— 独立 output thread，切设备不影响音乐，
-     *     音量键改控通话音量；代价是音质（窄带 + AEC）且设备候选里没有 A2DP。
-     * 关：媒体策略（STRATEGY_MEDIA）—— 原行为。
-     */
-    fun setUseCommunicationChannel(enabled: Boolean) {
-        audioBridge?.useCommunicationChannel = enabled
-        viewModelScope.launch { settingsStore.setUseCommunicationChannel(enabled) }
-    }
-
     fun setExclusiveAudio(enabled: Boolean) {
         audioBridge?.exclusiveAudio = enabled
         viewModelScope.launch { settingsStore.setExclusiveAudio(enabled) }

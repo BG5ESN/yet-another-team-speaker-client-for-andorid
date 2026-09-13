@@ -171,63 +171,6 @@ class AudioBridge(
     private var focusRetryToken = 0
 
     /**
-     * 输出通道：false = 媒体策略（默认，音质优先），true = 通信策略（路由隔离优先）。
-     *
-     * 切换必须**重建播放轨道** —— AudioAttributes 是 AudioTrack 创建时固定的，改不了。
-     * 重建会有一次极短的断音，这是换策略的必要代价。
-     */
-    @Volatile
-    var useCommunicationChannel: Boolean = false
-        set(value) {
-            if (field == value) return
-            field = value
-            Log.i(TAG, "输出通道 -> ${if (value) "通话" else "媒体"}")
-            audioRoute.communicationChannel = value
-            mainHandler.post {
-                applyAudioMode(value)
-                // 两个通道的设备列表来源不同（媒体=全部输出 / 通信=系统通信候选），必须重刷
-                audioRoute.refresh()
-                rebuildAudioTrack()
-                audioRoute.applyTo(audioTrack)
-            }
-        }
-
-    /**
-     * 设置系统音频模式。
-     *
-     * 通信通道必须进 MODE_IN_COMMUNICATION，否则 setCommunicationDevice 会抛
-     * IllegalStateException。
-     *
-     * ⚠️ Android 12+ 对 setMode 有所有权限制，被拒时是**静默无效**（不报错），
-     * 所以写完读回校验并留日志 —— 否则用户只会看到"切了没反应"。
-     */
-    private fun applyAudioMode(communication: Boolean) {
-        val want = if (communication) AudioManager.MODE_IN_COMMUNICATION else AudioManager.MODE_NORMAL
-        try {
-            audioManager.mode = want
-            val got = audioManager.mode
-            if (got == want) {
-                Log.i(TAG, "音频模式 -> $got")
-            } else {
-                Log.w(TAG, "音频模式未生效：想要 $want 实际 $got（Android 12+ 的所有权限制）")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "setMode 失败", e)
-        }
-    }
-
-    /** 重建播放轨道。换策略时唯一的路 —— AudioAttributes 创建后不可改。 */
-    private fun rebuildAudioTrack() {
-        try {
-            audioTrack?.stop()
-            audioTrack?.release()
-        } catch (_: Exception) {
-        }
-        audioTrack = null
-        initAudioTrack()
-    }
-
-    /**
      * 通话独占声音。
      *
      *  · true（默认）—— 请求 AUDIOFOCUS_GAIN，音乐类 App 收到 AUDIOFOCUS_LOSS 会暂停；
@@ -262,7 +205,7 @@ class AudioBridge(
     private fun requestAudioFocus() {
         try {
             val attrs = AudioAttributes.Builder()
-                .setUsage(audioUsageFor(audioRoute.communicationChannel))
+                .setUsage(AudioAttributes.USAGE_GAME)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
             val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
@@ -344,8 +287,6 @@ class AudioBridge(
             // 独占模式下才抢焦点；并存模式（exclusiveAudio=false）完全不碰焦点，
             // 让音乐继续放，我们的音频靠普通混音出声
             if (exclusiveAudio) requestAudioFocus()
-            // 重连后系统的音频模式可能已被重置，按当前通道重设一遍
-            applyAudioMode(audioRoute.communicationChannel)
             // 先启动设备监听：refresh() 会填好设备列表，initAudioTrack() 才能立刻应用偏好
             audioRoute.start()
             initAudioTrack()
@@ -495,7 +436,7 @@ class AudioBridge(
         audioTrack = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setUsage(audioUsageFor(audioRoute.communicationChannel))
+                    .setUsage(AudioAttributes.USAGE_GAME)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build()
             )
@@ -872,12 +813,6 @@ class AudioBridge(
         }
         userDecoders.clear()
         userJitter.clear()
-        // 退出通话要把模式交回系统、并清掉通信设备选择 ——
-        // 否则别的通话类 App 会继承我们留下的选择
-        if (audioRoute.communicationChannel) {
-            try { audioManager.clearCommunicationDevice() } catch (_: Exception) {}
-            applyAudioMode(false)
-        }
         audioRoute.stop()
     }
 
@@ -909,15 +844,3 @@ class AudioBridge(
  */
 internal fun shouldTransmitFrame(voiceActivatedMode: Boolean, isVoiceActive: Boolean): Boolean =
     !voiceActivatedMode || isVoiceActive
-
-/**
- * 输出通道 → AudioAttributes 用途。
- *
- *  · USAGE_GAME               → STRATEGY_MEDIA：和音乐同一条 mixer thread，音质好但互相牵连；
- *  · USAGE_VOICE_COMMUNICATION → STRATEGY_PHONE：独立的 output thread，与音乐隔离。
- *
- * 抽成顶层纯函数是为了这个映射能被单测钉住（两端常量值来自 AudioAttributes）。
- */
-internal fun audioUsageFor(communicationChannel: Boolean): Int =
-    if (communicationChannel) AudioAttributes.USAGE_VOICE_COMMUNICATION
-    else AudioAttributes.USAGE_GAME
