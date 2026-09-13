@@ -149,6 +149,7 @@
     <string name="route_type_aux">AUX 线路</string>
     <string name="route_type_hdmi">HDMI</string>
     <string name="route_type_dock">底座</string>
+    <string name="route_communication_channel">通话通道（与音乐隔离）</string>
     <string name="route_exclusive_audio">通话独占声音</string>
     <string name="route_type_other">其他音频设备</string>
 </resources>

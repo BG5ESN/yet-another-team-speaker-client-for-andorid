@@ -120,6 +120,7 @@ fun ServerScreen(
     val routeDevices by viewModel.routeDevices.collectAsStateWithLifecycle()
     val routeSelectedId by viewModel.routeSelectedId.collectAsStateWithLifecycle()
     val exclusiveAudio by viewModel.exclusiveAudio.collectAsStateWithLifecycle()
+    val useCommunicationChannel by viewModel.useCommunicationChannel.collectAsStateWithLifecycle()
     var routeMenuOpen by remember { mutableStateOf(false) }
     val userAvatars by viewModel.avatars.collectAsStateWithLifecycle()
     val serverInfo by viewModel.serverInfo.collectAsStateWithLifecycle()
@@ -336,6 +337,20 @@ fun ServerScreen(
                                     )
                                 }
                             }
+                            // 输出通道：决定我们的音频进哪条策略 —— 也就决定了
+                            // "切设备会不会连带把音乐换掉"。三个开关同一处，通话中一起切最顺手。
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.route_communication_channel)) },
+                                onClick = {
+                                    viewModel.setUseCommunicationChannel(!useCommunicationChannel)
+                                    routeMenuOpen = false
+                                },
+                                trailingIcon = {
+                                    if (useCommunicationChannel) {
+                                        Icon(Icons.Default.Check, contentDescription = null)
+                                    }
+                                },
+                            )
                             // 独占开关和"声音从哪出"是同一件事的两面（源不同就不必互斥），
                             // 所以放在同一个菜单里，通话中一起切最顺手。
                             DropdownMenuItem(

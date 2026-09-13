@@ -110,6 +110,7 @@
     <string name="route_type_aux">AUX line</string>
     <string name="route_type_hdmi">HDMI</string>
     <string name="route_type_dock">Dock</string>
+    <string name="route_communication_channel">Call channel (isolated)</string>
     <string name="route_exclusive_audio">Exclusive call audio</string>
     <string name="route_type_other">Other audio device</string>
 </resources>

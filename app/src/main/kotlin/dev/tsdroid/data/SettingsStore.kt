@@ -22,6 +22,7 @@ private val KEY_NOISE_SUPPRESSION = booleanPreferencesKey("noise_suppression")
 private val KEY_RING_THRESHOLD_DB = floatPreferencesKey("ring_threshold_db")
 // 输出设备路由：跟随系统存 -1；否则存 id + type + 名字（id 会在蓝牙重连后变，名字是兜底）
 private val KEY_EXCLUSIVE_AUDIO = booleanPreferencesKey("exclusive_audio")
+private val KEY_USE_COMMUNICATION_CHANNEL = booleanPreferencesKey("use_communication_channel")
 private val KEY_ROUTE_DEVICE_ID = intPreferencesKey("route_device_id")
 private val KEY_ROUTE_DEVICE_TYPE = intPreferencesKey("route_device_type")
 private val KEY_ROUTE_DEVICE_NAME = stringPreferencesKey("route_device_name")
@@ -100,6 +101,17 @@ class SettingsStore(private val context: Context) {
      */
     val exclusiveAudio: Flow<Boolean> = context.settingsDataStore.data
         .map { it[KEY_EXCLUSIVE_AUDIO] ?: true }
+
+    /**
+     * 输出通道：true = 走通信策略（STRATEGY_PHONE，与音乐隔离），false = 媒体策略（默认）。
+     * 默认 false 是为了不改变现有可用行为。
+     */
+    val useCommunicationChannel: Flow<Boolean> = context.settingsDataStore.data
+        .map { it[KEY_USE_COMMUNICATION_CHANNEL] ?: false }
+
+    suspend fun setUseCommunicationChannel(enabled: Boolean) {
+        context.settingsDataStore.edit { it[KEY_USE_COMMUNICATION_CHANNEL] = enabled }
+    }
 
     suspend fun setExclusiveAudio(enabled: Boolean) {
         context.settingsDataStore.edit { it[KEY_EXCLUSIVE_AUDIO] = enabled }
