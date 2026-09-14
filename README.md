@@ -50,23 +50,6 @@ TeamSpeak 3 安卓客户端。
 
 ---
 
-## 项目演示
-
-<div align="center">
-<table>
-  <tr>
-    <td align="center"><img src="img/screenshow1.jpg" width="240"/></td>
-    <td align="center"><img src="img/screenshow2.jpg" width="240"/></td>
-  </tr>
-  <tr>
-    <td align="center"><img src="img/screenshow3.jpg" width="240"/></td>
-    <td align="center"><img src="img/screenshow4.jpg" width="240"/></td>
-  </tr>
-</table>
-</div>
-
----
-
 ## 功能特性
 
 ### 语音通话
