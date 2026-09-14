@@ -7,14 +7,17 @@ app/build/
 .idea/
 *.iml
 local.properties
-gradle.properties
 
-# Native libs (built from tslib)
-app/src/main/jniLibs/
+# 注意：jniLibs/ **要提交**（见 README「原生库」一节）——
+# CI 用 -x buildRustLibs 跳过 Rust 编译，靠仓库里现成的 .so 出包。
+# 曾经这里写着忽略它，但文件早已被跟踪，等于自相矛盾，故删除该规则。
 
 # Signing
 *.keystore
 *.jks
+
+# Kotlin 编译缓存
+.kotlin/
 
 # OS
 .DS_Store
