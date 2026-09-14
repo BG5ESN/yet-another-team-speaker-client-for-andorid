@@ -1,10 +1,52 @@
 # TS3 Android 客户端（内部定制版）
 
-基于 [flamme-demon/TS6_Droid](https://github.com/flamme-demon/TS6_Droid)（GPLv3）裁剪定制的 TeamSpeak 3 安卓客户端。
+基于 [flamme-demon/TS6_Droid](https://github.com/flamme-demon/TS6_Droid)（原作者）经
+[YUAXI/TS6_Droid_CN](https://github.com/YUAXI/TS6_Droid_CN)（简体中文版）裁剪定制的
+TeamSpeak 3 安卓客户端。
 
 使用 Jetpack Compose 构建，底层由 Rust 编写的 `tslib` 驱动。
 
-> **这是内部定制版，不是面向公众的发行版。** 相比上游做了两件事：一是围绕语音通话做了一轮音频与稳定性专项（修偶发闪退、抖动缓冲、语音激活门控、输出设备路由等），二是按内部使用需求裁掉了与通话无关的模块（二次元壁纸、自定义背景、应用内检查更新等）。界面文案已去掉「二次元/Han」等对外表述。
+> **这是内部定制版，不是面向公众的发行版。** 相比直接上游做了两件事：一是围绕语音通话做了一轮
+> 音频与稳定性专项（修偶发闪退、抖动缓冲、语音激活门控、输出设备路由等）；二是按内部使用需求
+> **裁掉了与通话无关的模块**（详见下方「已移除的功能」）。界面文案已去掉「二次元 / Han」等对外表述。
+
+---
+
+## 来源与致谢
+
+本项目的全部基础来自这两位开发者的工作，请优先支持上游：
+
+| 项目 | 作者 | 说明 |
+|---|---|---|
+| [TS6_Droid](https://github.com/flamme-demon/TS6_Droid) | **flamme-demon** | 原始 Android 客户端，Jetpack Compose + Rust `tslib` 架构 |
+| [TS6_Droid_CN](https://github.com/YUAXI/TS6_Droid_CN) | **YUAXI** | 简体中文本地化版本，本项目直接基于它定制 |
+
+上游中文版的贡献者：
+
+<a href="https://github.com/YUAXI/TS6_Droid_CN/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=YUAXI/TS6_Droid_CN" />
+</a>
+
+本项目遵循 GPLv3，保留上游全部版权声明与许可证（见 [LICENSE](LICENSE)）。
+
+---
+
+## 已移除的功能
+
+以下功能在直接上游中存在，但**本仓库的代码里已经没有**，因此下方历史更新日志中涉及它们的
+描述仅作沿革记录，不代表当前可用：
+
+| 功能 | 移除提交 | 说明 |
+|---|---|---|
+| 二次元 / 动漫背景 | `1e90efd` | `AnimeBackground.kt` 整个删除；不再联网拉取壁纸 |
+| 自定义背景 | `1e90efd` | 相册选图 + 裁切界面（`CropScreen.kt`、`CustomBackgroundManager.kt`）整块删除 |
+| 壁纸缓存管理 | `1e90efd` | `WallpaperCacheManager.kt` 删除，设置页相关条目一并去掉 |
+| 应用内检查更新 | `681da28` | `UpdateChecker.kt` 删除；不再访问 GitHub Releases 查版本 |
+| 应用内下载安装 APK | `681da28` | `InAppUpdater.kt` 删除；相关 `FileProvider` 路径与权限声明一并去掉 |
+| 密聊（Whisper） | `21f38ef` | `WhisperManager.kt`、`WhisperBridge.kt` 删除；频道树与用户项相关入口去掉 |
+| 「关于」页的对外内容 | `681da28` | 改为内部说明，去掉项目宣传与更新入口 |
+
+因此，本文档的「功能特性」一节**只列当前代码里确实存在的功能**。
 
 ---
 
@@ -27,7 +69,7 @@
 
 ## 功能特性
 
-### 语音通话（本轮定制的重点）
+### 语音通话
 
 - **抖动缓冲 + 丢包隐藏**：按语音包号去重 / 重排 / PLC 补帧，抗网络抖动
 - **播放时钟时间基**：按绝对 20ms 时隙推进，不依赖 `playbackHeadPosition`
@@ -42,13 +84,17 @@
 ### 通话交互
 
 - **全屏触摸 PTT**：PTT 模式下双指唤出，任意位置按住即说话，松开停止；期间屏幕常亮
-- **悬浮窗**：其他应用上层显示说话人，支持开关
-- **Java 崩溃取证**：`Thread.UncaughtExceptionHandler` + `ApplicationExitInfo` 补记，
+- **悬浮窗**：其他应用上层显示当前说话人，支持开关
+- **崩溃取证**：`Thread.UncaughtExceptionHandler` + `ApplicationExitInfo` 补记，
   毫秒级时间戳防同名覆盖，原生 trace 从 protobuf 二进制里提取可读片段
 
 ### 本地化
 
 - 简体中文 100% 补齐（`zh-rCN`），支持中文 / English / Français 应用内切换
+
+### 保留的通用能力
+
+- 频道树、文字消息（频道 / 私聊）、文件传输与图片预览、头像与频道图标、消息本地持久化
 
 ---
 
@@ -143,47 +189,45 @@
 
 - 修主线程 CPU 空转（`isLocalVoiceActive` getter 每次读都新建 `StateFlow`，
   Compose 反复取消/重建订阅）
-- 应用名改为 TS3；内部化裁剪：移除二次元壁纸 / 自定义背景整套、内部化「关于」页、
-  移除应用内检查更新、去掉密聊
+- 应用名改为 TS3
+- **内部化裁剪**：移除二次元壁纸 / 自定义背景整套、内部化「关于」页、移除应用内检查更新、去掉密聊
+  （详见「已移除的功能」）
 
-### v2.1.4-Han 及更早（上游历史）
+### v2.1.4-Han 及更早（上游沿革，仅作记录）
 
 <details>
 <summary>展开查看</summary>
 
+> ⚠️ 以下是直接上游（`TS6_Droid_CN`）的历史条目。其中**自定义背景、壁纸缓存、应用内更新**
+> 等功能已在本项目中移除，此处保留仅为沿革记录，**不代表当前可用**。详见「已移除的功能」。
+
 #### v2.1.4-Han（2026-08-18）
 
-- **昵称长度验证**：连接服务器时增加昵称最小长度检查，至少 3 个字符
-- 提取 `getValidatedConnectionInput()` 统一处理连接前输入验证
-- 新增错误提示「昵称至少需要 3 个字符」（中/英/法三语）
+- 昵称长度验证：连接服务器时校验昵称至少 3 个字符（中/英/法三语提示）
 
 #### v2.1.3-Han（2026-07-28）
 
-- **TS3 Spacer 频道渲染**：解析 `[cspacer]`、`[lspacer]`、`[rspacer]`、`[*spacer]` 标签
+- TS3 Spacer 频道渲染：解析 `[cspacer]`、`[lspacer]`、`[rspacer]`、`[*spacer]` 标签
 
 #### v2.1.2-Han（2026-07-15）
 
-- **自定义背景**：从相册上传图片作为背景，裁切预览（双指缩放 + 单指拖动）
+- *（已移除）* 自定义背景：相册上传 + 裁切预览
 - 设置页改为卡片式布局：外观、音频、聊天、更多
-- 修复裁切框只能移动不能缩放、保存后需重启才生效
 
 #### v2.1.0-Han（2026-06-27）
 
-- **应用内更新**：应用内下载并安装 APK，进度条实时显示
-- 修复版本检测无法识别新版、API 失败时误判为「已是最新」
+- *（已移除）* 应用内更新：应用内下载并安装 APK、进度条显示
 
 #### v2.0.1-Han（2026-06-26）
 
 - 全项目 54 处 Flow 采集迁移至 `collectAsStateWithLifecycle`，降低后台 CPU 与耗电
 - 背景淡入动画改用 `Modifier.graphicsLayer {}`，跳过 Composition 阶段
-- 修复壁纸缓存、音量增益滑块、设置页开关闪烁、图片文件应用内预览等问题
 
 #### v2.0.0-Han（2026-06-26）
 
-- **Material 3 全面重构**：Dynamic Color 动态取色（Android 12+）、15 级排版体系
-- 新增 SplashScreen 启动界面；首页底部导航栏（主页 + 设置）
-- 壁纸缓存系统（容量可调、缩略图网格、二次确认清空）
-- 修复 `Config#HARDWARE` bitmap 无法 `getPixel` 导致的闪退
+- Material 3 全面重构：Dynamic Color 动态取色（Android 12+）、15 级排版体系
+- 新增 SplashScreen 启动界面、首页底部导航栏（主页 + 设置）
+- *（已移除）* 壁纸缓存系统、自定义背景相关能力
 
 </details>
 
@@ -215,7 +259,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 产物：`app/build/outputs/apk/debug/app-debug.apk`
 
 > `-x buildRustLibs` 是**必需**的 —— 除非你本地装了 Rust 工具链并克隆了上游
-> `tslib` 源码，否则跳过它直接使用 `jniLibs/` 里现成的 `.so`。
+> `tslib` 源码，否则跳过它、直接使用 `jniLibs/` 里现成的 `.so`。
 
 ### 关于原生库（`jniLibs/`）
 
@@ -224,12 +268,6 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 支持的 ABI：**arm64-v8a**、**x86_64**
 （另外两个 ABI 目录里只有 AndroidX 的辅助库，没有 `libtslib_jni.so`）
-
-```bash
-# 仓库里签入的原生库
-app/src/main/jniLibs/arm64-v8a/libtslib_jni.so
-app/src/main/jniLibs/x86_64/libtslib_jni.so
-```
 
 需要重新编译原生库时，参考上游仓库的 Rust 构建说明。
 
@@ -263,7 +301,8 @@ keytool -genkey -v -keystore release.keystore -alias <your-alias> \
 
 底层 Rust 架构、本地编译环境搭建等技术细节，参考上游仓库：
 
-[flamme-demon/TS6_Droid](https://github.com/flamme-demon/TS6_Droid)
+- [flamme-demon/TS6_Droid](https://github.com/flamme-demon/TS6_Droid)
+- [YUAXI/TS6_Droid_CN](https://github.com/YUAXI/TS6_Droid_CN)
 
 ---
 
@@ -271,5 +310,4 @@ keytool -genkey -v -keystore release.keystore -alias <your-alias> \
 
 本项目遵循 **GNU GPLv3** 开源许可证，详见 [LICENSE](LICENSE)。
 
-作为上游 [flamme-demon/TS6_Droid](https://github.com/flamme-demon/TS6_Droid) 的衍生作品，
-本项目保留原许可证与版权声明，并按 GPLv3 要求公开全部源码。
+作为上游的衍生作品，本项目保留原许可证与全部版权声明，并按 GPLv3 要求公开全部源码。
