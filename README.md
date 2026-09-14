@@ -1,6 +1,7 @@
-# TS3 Android 客户端
+# YATS3
 
-基于 [flamme-demon/TS6_Droid](https://github.com/flamme-demon/TS6_Droid)（原作者）经
+**Y**et **A**nother **TS3** —— 基于
+[flamme-demon/TS6_Droid](https://github.com/flamme-demon/TS6_Droid)（原作者）经
 [YUAXI/TS6_Droid_CN](https://github.com/YUAXI/TS6_Droid_CN)（简体中文版）裁剪定制的
 TeamSpeak 3 安卓客户端。使用 Jetpack Compose 构建，音频链路由 Rust 编写的 `tslib` 驱动。
 
@@ -14,12 +15,12 @@ TeamSpeak 3 安卓客户端。使用 Jetpack Compose 构建，音频链路由 Ru
 
 ## 来源与致谢
 
-本项目的全部基础来自以下上游项目：
+YATS3 的全部基础来自以下上游项目：
 
 | 项目 | 作者 | 说明 |
 |---|---|---|
 | [TS6_Droid](https://github.com/flamme-demon/TS6_Droid) | flamme-demon | 原始 Android 客户端，Jetpack Compose + Rust `tslib` 架构 |
-| [TS6_Droid_CN](https://github.com/YUAXI/TS6_Droid_CN) | YUAXI | 简体中文本地化版本，本项目的直接基础 |
+| [TS6_Droid_CN](https://github.com/YUAXI/TS6_Droid_CN) | YUAXI | 简体中文本地化版本，YATS3 的直接基础 |
 
 上游中文版贡献者：
 
@@ -27,13 +28,13 @@ TeamSpeak 3 安卓客户端。使用 Jetpack Compose 构建，音频链路由 Ru
   <img src="https://contrib.rocks/image?repo=YUAXI/TS6_Droid_CN" />
 </a>
 
-本项目遵循 GPLv3，保留上游全部版权声明与许可证，详见 [LICENSE](LICENSE)。
+YATS3 遵循 GPLv3，保留上游全部版权声明与许可证，详见 [LICENSE](LICENSE)。
 
 ---
 
 ## 已移除的功能
 
-以下功能存在于直接上游，本仓库已移除。更新日志中涉及它们的条目为上游沿革记录，
+以下功能存在于直接上游，YATS3 已移除。更新日志中涉及它们的条目为上游沿革记录，
 不代表当前可用。
 
 | 功能 | 移除提交 | 移除范围 |
@@ -244,6 +245,6 @@ keystore 及其口令不得提交至仓库。
 
 ## 开源许可
 
-本项目遵循 GNU GPLv3 开源许可证，详见 [LICENSE](LICENSE)。
+YATS3 遵循 GNU GPLv3 开源许可证，详见 [LICENSE](LICENSE)。
 
 作为上游的衍生作品，本项目保留原许可证与全部版权声明，并按 GPLv3 要求公开全部源码。
